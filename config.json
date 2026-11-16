@@ -1,0 +1,21 @@
+{
+  "symbols": ["BTC", "ETH"],
+  "ltf": "5m",
+  "ltf_bars": 1200,
+  "notify": ["limit", "entry", "exit", "cancel"],
+  "lookback_min": 60,
+  "display_tz": "Asia/Taipei",
+  "params": {
+    "crt_tf": "1H",
+    "kl_tf": "4H",
+    "aggressive": false,
+    "e1": true, "e2": true, "e3": true, "e4": true, "e5": true, "e6": true, "e7": false, "e8": false,
+    "min_rr": 0,
+    "kl_only": true,
+    "ts_gap": true,
+    "w_tp": [25, 25, 25, 25],
+    "be_tp1": true,
+    "tr_tp2": false,
+    "hold_max": 0
+  }
+}
