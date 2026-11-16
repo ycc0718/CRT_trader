@@ -1,0 +1,71 @@
+name: CRT scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 備援用：GitHub 自己的排程常常晚 5～15 分鐘。準時的觸發交給 cron-job.org（見說明）
+    - cron: "7-59/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      replay:
+        description: "列出最近 4 天所有訊號（拿來跟 TradingView 對），不發通知"
+        type: boolean
+        default: false
+
+concurrency:
+  group: crt-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # 記住已經送過的通知，避免重複
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: crt-state-${{ github.run_id }}
+          restore-keys: crt-state-
+
+      - name: Scan
+        if: ${{ !inputs.replay }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scan.py
+
+      - name: Replay (verify against TradingView)
+        if: ${{ inputs.replay }}
+        env:
+          SYMBOLS: ${{ vars.SYMBOLS }}
+        run: python scan.py --replay --csv signals.csv | tee replay.txt
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.replay }}
+        with:
+          name: replay
+          path: |
+            replay.txt
+            signals.csv
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: crt-state-${{ github.run_id }}
