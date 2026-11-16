@@ -41,6 +41,13 @@ jobs:
           key: crt-state-${{ github.run_id }}
           restore-keys: crt-state-
 
+      - name: Hello (connection test on every update)
+        if: ${{ github.event_name == 'push' }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+        run: python scan.py --hello
+
       - name: Scan
         if: ${{ !inputs.replay }}
         env:

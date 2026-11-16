@@ -165,11 +165,20 @@ def main() -> None:
     ap.add_argument("--replay", action="store_true")
     ap.add_argument("--csv")
     ap.add_argument("--stateless", action="store_true")
+    ap.add_argument("--hello", action="store_true", help="送一則連線測試訊息")
     ap.add_argument("--search", help="搜尋 OKX 永續合約代號，例如 --search sol")
     a = ap.parse_args()
     cfg = load_cfg(Path(a.config))
     if os.environ.get("SYMBOLS"):  # 雲端用環境變數改商品，例如 SYMBOLS=BTC,ETH,SOL
         cfg["symbols"] = os.environ["SYMBOLS"].split(",")
+    if a.hello:
+        lines = []
+        for sym, tick in resolve_symbols(cfg["symbols"]).items():
+            b = okx.candles(sym, cfg.get("ltf", "5m"), 1)[-1]
+            lines.append(f"{sym}  最新收盤 {b.c}")
+        notify.send("confirm", 0, "✅ CRT 掃描器連線正常\n" + "\n".join(lines) + "\n之後有新的掛單 / 進場 / 出場才會通知",
+                    fmt_t(int(time.time() * 1000), cfg.get("display_tz", "Asia/Taipei")))
+        return
     if a.search:
         q = a.search.upper()
         print("\n".join(k for k in sorted(okx.instruments("SWAP")) if q in k) or "沒有找到")
