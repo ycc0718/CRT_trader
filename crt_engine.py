@@ -659,39 +659,61 @@ class Engine:
     def head(self, c: CRT) -> str:
         return f"{self.sym} — {self.crtName}"
 
-    def entryText(self, c: CRT) -> str:
+    def disp(self) -> str:
+        return self.sym.replace("-SWAP", ".P").replace("-", "")
+
+    def tagId(self, c: CRT) -> str:
+        d = datetime.fromtimestamp(c.t2 / 1000, tz=timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+        return f"#{self.disp().replace('.', '')}{self.crtName}{d:%m%d%H}"
+
+    def card(self, c: CRT, px, sig: int, mode: str) -> str:
+        """Discord 訊息卡片（進場 / 掛單）。第一行是標題。"""
         bear = c.dir < 0
+        a1, a2, a3, a4, t1 = self.calcR(c, px)
+        tp, rr = [t1, c.rL if bear else c.rH, c.tp3, c.tp4], [a1, a2, a3, a4]
+        r1 = a1 or 0.0
+        grade = "🔴 低 (RR < 0.5)" if r1 < 0.5 else "🟡 中 (RR 0.5~1.0)" if r1 < 1 else "🟢 高 (RR ≥ 1.0)"
+        prem = px > c.mid
+        good = prem if bear else not prem
+        rng = c.rH - c.rL
+        depth = (((c.rH - c.ext) if bear else (c.ext - c.rL)) / rng) if rng > 0 else 0.0
+        conf = [self.kName(sig)]
+        same = {1: "CISD", 2: "CISD", 3: "IFVG", 4: "MSS", 6: "BB"}.get(sig)
+        conf += [n for n, ok in (("CISD", c.cbHit), ("IFVG", c.ifTop is not None), ("BB", c.bbAct), ("MSS", c.mss), ("TBS", c.tbs))
+                 if ok and n != same]
+        aggr = mode == "entry" and c.preConf or mode != "entry" and not c.confirmed
+        head = f"{'⚡' if aggr else '🆕'} {self.disp()} | {self.crtName} CRT {'進場' if mode == 'entry' else '掛單'}【{'激進' if aggr else '標準'}】"
+        L = [f"🔍 {self.tagId(c)}", "━━━━━━━━━━━━━━",
+             f"💰 {'進場價' if mode == 'entry' else '掛單價'}：{self.px(px)}",
+             f"{'📉' if bear else '📈'} 方向：{'看空 (SHORT)' if bear else '看多 (LONG)'}",
+             f"⚡ 觸發來源：{' + '.join(conf)}",
+             f"📊 盈虧評級：{grade}",
+             f"📍 相對位置：{'🟢' if good else '🔴'} {'溢價區 Premium' if prem else '折價區 Discount'}",
+             f"🐢 TBS：{'✅ 收盤穿越' if c.tbs else '⚪ 只有影線（TWS）'}",
+             f"🔄 CISD：{'🟢 已破' if c.cbHit else '⚪ 未破'} {self.px(c.cisdLvl)}",
+             f"📐 掃蕩深度：{depth:.2f}",
+             f"🔑 KL：{c.klName or '無'}",
+             f"🧩 Model：M{c.model}" + (f" · 時段 {c.sess}" if c.sess else "")]
+        if aggr:
+            L.append("⚠️ 尚未收盤確認，提前進場")
+        L.append("━━━━━━━━━━━━━━")
+        for k in range(4):
+            L.append(f"🎯 TP{k + 1}: {self.px(tp[k])} (RR: {'—' if rr[k] is None else f'{rr[k]:.2f}'})")
+        L += ["", f"🚫 SL: {self.px(c.sl)}"]
+        return head + "\n" + "\n".join(L)
+
+    def entryText(self, c: CRT) -> str:
         others = [f"{self.kName(k)} {self.px(v)}" for k, v in c.lv.items() if v is not None and k != c.eKind]
-        tim = "激進" if self.p.aggressive else "保守"
-        return (f"{self.head(c)}{' 空方 CRT 進場 SHORT' if bear else ' 多方 CRT 進場 LONG'}\n"
-                f"訊號：{self.kName(c.eKind)}（{tim}）\n{self.kDesc(c.eKind, bear)}\n"
-                f"KL：{c.klName or '無'} · {'TBS' if c.tbs else 'TWS'}\n"
-                f"進場 {self.px(c.ePx)}\nSL {self.px(c.sl)}\n"
-                f"TP1 {self.px(c.t1Px)} · {r_txt(c.r1)}\nTP2 {self.px(c.rL if bear else c.rH)} · {r_txt(c.r2)}\n"
-                f"TP3 {c.tp3Name} {self.px(c.tp3)} · {r_txt(c.r3)}\nTP4 {c.tp4Name} {self.px(c.tp4)} · {r_txt(c.r4)}\n"
-                f"{self.mgmtTxt()}" + (f"\n其他掛單請取消：{' · '.join(others)}" if others else ""))
+        return (self.card(c, c.ePx, c.eKind, "entry") + f"\n\n📋 {self.mgmtTxt()}"
+                + (f"\n❗ 其他掛單請取消：{' · '.join(others)}" if others else ""))
 
     def limitText(self, c: CRT, k: int, lv) -> str:
-        bear = c.dir < 0
-        a1, a2, a3, a4, t1 = self.calcR(c, lv)
-        return (f"{self.head(c)}{' 空方 CRT 掛 SELL LIMIT ' if bear else ' 多方 CRT 掛 BUY LIMIT '}{self.px(lv)}\n"
-                f"訊號：{self.kName(k)}\n{self.kDesc(k, bear)}\nKL：{c.klName or '無'}\n"
-                f"SL {self.px(c.sl)}\nTP1 {self.px(t1)} · {r_txt(a1)}\nTP2 {self.px(c.rL if bear else c.rH)} · {r_txt(a2)}\n"
-                f"TP3 {self.px(c.tp3)} · {r_txt(a3)}\nTP4 {self.px(c.tp4)} · {r_txt(a4)}"
-                + ("\n（FIB 掛單價會跟著新的極值移動）" if k == 7 else ""))
+        return self.card(c, lv, k, "limit") + ("\n（FIB 掛單價會跟著新的極值移動）" if k == 7 else "")
 
     def limitGroupText(self, evs: list) -> str:
-        e0 = evs[0].data
-        bear = e0["dir"] < 0
-        tp, sl = e0["tp"], e0["sl"]
-        lines = [f"{self.sym} — {self.crtName}{' 空方' if bear else ' 多方'} CRT 掛 {'SELL' if bear else 'BUY'} LIMIT ×{len(evs)}（先碰到的先成交，其他取消）"]
-        for e in evs:
-            d = e.data
-            lines.append(f"{self.kName(d['sig'])}  {self.px(d['price'])}  · TP1 {r_txt(d['r'][0])} · TP2 {r_txt(d['r'][1])}")
-        lines.append(f"KL：{e0.get('kl') or '無'}")
-        lines.append(f"SL {self.px(sl)}")
-        lines.append(f"TP1 {self.px(tp[0])} · TP2 {self.px(tp[1])} · TP3 {self.px(tp[2])} · TP4 {self.px(tp[3])}")
-        return "\n".join(lines)
+        lines = evs[0].text.split("\n")
+        items = " / ".join(f"{self.kName(e.data['sig'])} {self.px(e.data['price'])}" for e in evs)
+        return "\n".join(f"💰 掛單（先碰到的先成交，其他取消）：{items}" if ln.startswith("💰") else ln for ln in lines)
 
     def resText(self, c: CRT) -> str:
         if not c.entered:
@@ -1242,7 +1264,9 @@ class Engine:
                         if ev:
                             txt = (f"{self.head(cr)}{' 空單 ' if bear else ' 多單 '}{ev} · 累計 {sgn(cr.rz)}R"
                                    + ("" if cr.done else f" · 還剩 {round(cr.wRem * 100)}%") + f" · {self.kName(cr.eKind)}")
-                            self.emit("exit", cr, txt, ev=ev, rz=cr.rz, done=cr.done)
+                            self.emit("exit", cr, txt, ev=ev, rz=cr.rz, done=cr.done,
+                                      hits=[cr.tp1, cr.tp2, cr.tp3Hit, cr.tp4Hit], stopped=cr.stopped,
+                                      be=cr.stopped and cr.slNow == cr.ePx)
                 else:
                     canEnter = cr.state == 1 or (p.aggressive and (c < cr.rH if bear else c > cr.rL))
                     filled = False
@@ -1268,7 +1292,7 @@ class Engine:
                                 if (h > cr.sl) if bear else (l < cr.sl):
                                     self.stopOut(cr)
                                     self.emit("exit", cr, f"{self.head(cr)}{' 空單 ' if bear else ' 多單 '}掛單成交的同一根 K 就碰到停損 · {sgn(cr.rz)}R",
-                                              ev="✗ 停損", rz=cr.rz, done=True)
+                                              ev="✗ 停損", rz=cr.rz, done=True, hits=[False] * 4, stopped=True, be=False)
                     if not cr.done and not filled:
                         if (h > cr.ext) if bear else (l < cr.ext):
                             self.cancelPending(cr, f"價格再掃{'更高' if bear else '更低'}，掃點 / 停損更新，等新的進場訊號")

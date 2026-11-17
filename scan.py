@@ -70,18 +70,37 @@ def fmt_t(ms: int, tz: str) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz)).strftime("%m/%d %H:%M")
 
 
-def load_state() -> dict:
+def load_state() -> tuple[dict, dict]:
+    """sent：已送過的事件；msgs：進場卡片的 Discord 訊息（之後在 TP 後面打勾）。"""
     try:
-        return json.loads(STATE.read_text(encoding="utf-8"))
+        js = json.loads(STATE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        return {}, {}
+    if "sent" not in js:  # 舊格式
+        return js, {}
+    return js["sent"], js.get("msgs", {})
 
 
-def save_state(st: dict) -> None:
+def save_state(st: dict, msgs: dict) -> None:
     cutoff = time.time() * 1000 - 4 * 86_400_000
     st = {k: v for k, v in st.items() if v >= cutoff}
+    msgs = {k: v for k, v in msgs.items() if v.get("t", 0) >= cutoff}
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(st), encoding="utf-8")
+    STATE.write_text(json.dumps({"sent": st, "msgs": msgs}, ensure_ascii=False), encoding="utf-8")
+
+
+def mark_card(m: dict, d: dict) -> None:
+    """在原本的進場卡片上打勾：TP 打到 ✅，出場加一行結果。"""
+    lines = m["desc"].split("\n")
+    for k, hit in enumerate(d.get("hits", [])):
+        tag = f"🎯 TP{k + 1}:"
+        lines = [ln + " ✅" if hit and ln.startswith(tag) and not ln.endswith("✅") else ln for ln in lines]
+    if d.get("done"):
+        res = ("⚪ 保本出場" if d.get("be") else "❌ 停損出場") if d.get("stopped") else "🏁 全部出場"
+        lines = [ln for ln in lines if not ln.startswith(("❌ 停損出場", "⚪ 保本出場", "🏁 全部出場"))]
+        lines.insert(lines.index("") if "" in lines else len(lines), f"{res} · 合計 {d.get('rz', 0):+.2f}R")
+    m["desc"] = "\n".join(lines)
+    notify.edit(m["id"], m["title"], m["desc"], m["color"])
 
 
 def _eid(sym: str, ev) -> str:
@@ -89,7 +108,7 @@ def _eid(sym: str, ev) -> str:
 
 
 def scan_once(cfg: dict, stateless: bool = False) -> int:
-    st = {} if stateless else load_state()
+    st, msgs = ({}, {}) if stateless else load_state()
     first_run = not st and not stateless
     now = time.time() * 1000
     ltf_ms = TF_MS[cfg.get("ltf", "5m")]
@@ -119,7 +138,15 @@ def scan_once(cfg: dict, stateless: bool = False) -> int:
             ev = g[0]
             text = eng.limitGroupText(g) if len(g) > 1 else ev.text
             close_t = ev.t + ltf_ms
-            notify.send(ev.kind, ev.data.get("dir", 0), text, fmt_t(close_t, tz) + "（K 棒收盤）")
+            info = notify.send(ev.kind, ev.data.get("dir", 0), text, fmt_t(close_t, tz) + "（K 棒收盤）")
+            mk = f"{sym}|{ev.key}"
+            if ev.kind == "entry" and info and info.get("id"):
+                msgs[mk] = dict(info, t=close_t)
+            elif ev.kind == "exit" and mk in msgs:
+                try:
+                    mark_card(msgs[mk], ev.data)
+                except Exception as e:
+                    print(f"改訊息失敗：{e}", file=sys.stderr)
             for e in g:
                 st[_eid(sym, e)] = close_t
             sent += 1
@@ -127,7 +154,7 @@ def scan_once(cfg: dict, stateless: bool = False) -> int:
             for ev in eng.events:
                 st.setdefault(_eid(sym, ev), ev.t + ltf_ms)
     if not stateless:
-        save_state(st)
+        save_state(st, msgs)
     print(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}Z 送出 {sent} 則")
     return sent
 
