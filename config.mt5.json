@@ -1,0 +1,24 @@
+{
+  "source": "mt5",
+  "mt5_path": "C:\\Users\\user\\claude\\MT5\\MT5_Strategy1\\terminal64.exe",
+  "symbols": ["XAUUSDm", "EURUSDm", "GBPUSDm", "USDJPYm", "USTECm", "US500m"],
+  "ltf": "5m",
+  "ltf_bars": 3000,
+  "htf_bars": 600,
+  "notify": ["limit", "entry", "exit", "cancel"],
+  "lookback_min": 60,
+  "display_tz": "Asia/Taipei",
+  "params": {
+    "crt_tf": "1H",
+    "kl_tf": "4H",
+    "aggressive": false,
+    "e1": true, "e2": true, "e3": true, "e4": true, "e5": true, "e6": true, "e7": false, "e8": false,
+    "min_rr": 0,
+    "kl_only": true,
+    "ts_gap": true,
+    "w_tp": [25, 25, 25, 25],
+    "be_tp1": true,
+    "tr_tp2": false,
+    "hold_max": 0
+  }
+}

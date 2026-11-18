@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRT 訊號</title>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { --bg:#0d0f14; --panel:#161a22; --line:#262c38; --txt:#d7dce5; --muted:#8a93a3;
+          --bull:#17a88f; --bear:#ff5577; --bullT:#5fd3bd; --bearT:#ff8fa5; --rng:#e8a21b; --en:#4c8dff;
+          --sl:#ff3b5c; --tp:#2fd0b2; --kl:#a77bff; --red:#ff3b30; --ok:#3fb950; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.45 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif; }
+  header { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 6px 0 0; font-weight:600; }
+  .pill { padding:2px 8px; border-radius:10px; background:var(--panel); color:var(--muted); font-size:12px; white-space:nowrap; }
+  .pill.warn { color:#ffb340; } .pill.bad { color:var(--red); }
+  .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; background:#555; vertical-align:1px; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--red); }
+  button { background:var(--panel); color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; font-size:13px; }
+  button:hover { border-color:#3a4252; }
+  main { padding:14px 16px; display:grid; gap:14px; max-width:1600px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px; cursor:pointer; min-width:0; }
+  .card.sel { border-color:#5a6578; box-shadow:0 0 0 1px #5a6578 inset; }
+  .card .top { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  .sym { font-size:16px; font-weight:600; }
+  .px { font-variant-numeric:tabular-nums; }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:1px 0; }
+  .muted { color:var(--muted); } .bull { color:var(--bullT); } .bear { color:var(--bearT); }
+  .err { color:var(--red); font-size:12px; }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; font-weight:600; }
+  .tag.L { background:#17a88f33; color:var(--bullT); } .tag.S { background:#ff557733; color:var(--bearT); }
+  .st { font-size:12px; color:var(--muted); }
+  .st.hold { color:#ffd60a; } .st.lim { color:#7fb0ff; }
+  .tps { font-size:12px; margin-top:4px; border-top:1px dashed var(--line); padding-top:4px; }
+  .hit { color:var(--tp); }
+  .section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; overflow-x:auto; }
+  .section h2 { font-size:14px; margin:0 0 8px; font-weight:600; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #chart { height:max(460px, 62vh); }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; font-size:12px; color:var(--muted); margin:0 0 6px; }
+  .legend i { display:inline-block; width:14px; height:3px; border-radius:2px; vertical-align:middle; margin-right:4px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  th { color:var(--muted); font-weight:500; }
+  tr.ev { cursor:pointer; } tr.ev:hover td { background:#1b2029; }
+  pre.card-text { margin:4px 0; white-space:pre-wrap; font:13px/1.5 inherit; font-family:inherit; background:#0f1218; border-radius:8px; padding:8px 10px; }
+  .k { display:inline-block; min-width:44px; text-align:center; border-radius:4px; font-size:12px; padding:0 4px; }
+  .k.limit { background:#4c8dff26; color:#8fb5ff; } .k.entry { background:#ffd60a22; color:#ffd60a; }
+  .k.exit { background:#e8a21b22; color:#f0bb55; } .k.cancel { background:#88888822; color:#aaa; } .k.confirm { background:#a77bff22; color:#c4a6ff; }
+  select { background:#0f1218; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:3px 6px; font:inherit; font-size:13px; }
+  details summary { cursor:pointer; color:var(--muted); }
+  .note { font-size:12px; color:var(--muted); }
+  .symbar { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .chip { display:inline-flex; align-items:center; gap:2px; padding:2px 2px 2px 9px; border-radius:12px; background:#0f1218; border:1px solid var(--line); font-size:13px; }
+  .chip b { cursor:pointer; color:var(--muted); padding:0 6px; font-weight:400; }
+  .chip b:hover { color:var(--red); }
+  .pick { position:relative; flex:1 1 260px; max-width:420px; }
+  .pick input { width:100%; }
+  .drop { position:absolute; top:calc(100% + 4px); left:0; right:0; min-width:300px; z-index:20; background:var(--panel); border:1px solid #3a4252; border-radius:8px; max-height:360px; overflow:auto; display:none; box-shadow:0 8px 24px #0008; }
+  .drop .it { padding:6px 10px; cursor:pointer; display:flex; justify-content:space-between; gap:12px; font-size:13px; }
+  .drop .it.on, .drop .it:hover { background:#232a36; }
+  input { background:#0f1218; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; font-size:13px; min-width:0; }
+  dialog { background:var(--panel); color:var(--txt); border:1px solid var(--line); border-radius:10px; width:min(600px,94vw); }
+  dialog::backdrop { background:#0009; }
+  dialog h3 { margin:0 0 4px; font-size:15px; }
+  dialog label { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+  dialog label input[type=password] { flex:1; }
+  fieldset { border:1px solid var(--line); border-radius:8px; margin:10px 0; }
+  legend { color:var(--muted); padding:0 6px; font-size:13px; }
+  @media (max-width:600px) { main { padding:10px; } header { padding:8px 10px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>CRT 訊號</h1>
+  <span class="pill" id="pMt5"><span class="dot" id="dMt5"></span>MT5</span>
+  <span class="pill" id="pAcct">帳戶 —</span>
+  <span class="pill" id="pTf">—</span>
+  <span class="pill" id="pScan">上次掃描 —</span>
+  <span class="pill" id="pNext">—</span>
+  <span class="pill" id="pDiscord">Discord —</span>
+  <button id="btnScan" title="不等 K 棒收盤，馬上重跑一次">立即掃描</button>
+  <button id="btnSet">⚙ 通知設定</button>
+</header>
+<main>
+  <div class="symbar">
+    <span class="muted">商品</span>
+    <span id="chips"></span>
+    <div class="pick">
+      <input id="symQ" placeholder="加商品：打幾個字，例如 xau、gold、nas、eu、黃金" autocomplete="off" spellcheck="false">
+      <div id="symList" class="drop"></div>
+    </div>
+    <span id="symMsg" class="note"></span>
+  </div>
+  <div id="alerts"></div>
+  <div class="grid" id="cards"></div>
+
+  <div class="section">
+    <h2><span id="chartTitle">—</span><span class="note">5 分 K（已收盤）· 線 = 這個商品還在進行的 CRT · 箭頭 = 進場、圓點 = 出場 / 確認</span></h2>
+    <div class="legend">
+      <span><i style="background:var(--rng)"></i>CRH / CRL</span><span><i style="background:var(--en)"></i>進場 / 掛單</span>
+      <span><i style="background:var(--sl)"></i>SL</span><span><i style="background:var(--tp)"></i>TP1–TP4</span><span><i style="background:var(--kl)"></i>KL</span>
+    </div>
+    <div id="chart"></div>
+  </div>
+
+  <div class="section">
+    <h2>進行中的 CRT <span class="note">掃蕩中 → 已確認 → 掛單 / 持倉；結束後會從這裡消失（看下面的訊號紀錄）</span></h2>
+    <table><thead><tr><th>商品</th><th>方向</th><th>狀態</th><th>C1</th><th>CRH / CRL</th><th>KL</th><th>Model</th><th>進場 / 掛單</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>TP4</th><th>備註</th></tr></thead>
+    <tbody id="active"></tbody></table>
+  </div>
+
+  <div class="section" id="posBox" style="display:none">
+    <h2>MT5 帳戶持倉 / 掛單（手動單）</h2>
+    <table><thead><tr><th>商品</th><th>方向</th><th>手數</th><th>開倉</th><th>SL</th><th>TP</th><th>現價</th><th>損益</th></tr></thead>
+    <tbody id="pos"></tbody></table>
+  </div>
+
+  <div class="section">
+    <h2>訊號紀錄
+      <select id="fSym"><option value="">全部商品</option></select>
+      <select id="fKind"><option value="">全部事件</option><option value="limit">掛單</option><option value="entry">進場</option>
+        <option value="exit">出場</option><option value="cancel">取消</option><option value="confirm">CRT 確認</option></select>
+      <span class="note">點一列看完整卡片（跟 Discord 一樣）</span></h2>
+    <table><thead><tr><th>時間（K 收盤）</th><th>商品</th><th>事件</th><th>內容</th><th>價格</th><th>SL</th></tr></thead>
+    <tbody id="events"></tbody></table>
+  </div>
+
+  <div class="section">
+    <h2>回放統計 <span class="note" id="statNote"></span></h2>
+    <table><thead><tr><th>商品</th><th>已結算</th><th>TP1</th><th>TP2</th><th>TP3</th><th>TP4</th><th>先停損</th><th>分批+保本 R/筆</th><th>合計 R</th><th>setup</th><th>沒觸發</th><th>被過濾</th><th>用到的進場訊號</th></tr></thead>
+    <tbody id="stats"></tbody></table>
+    <details style="margin-top:8px"><summary>目前參數（改 config.mt5.json，下一次掃描自動套用）</summary><pre class="card-text" id="params"></pre></details>
+  </div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="setForm">
+    <h3>通知設定</h3>
+    <div class="note">跟 8010 一樣由這個儀表板自己發 Discord。<b>只通知、不會自動下單</b>——看到訊息自己到 MT5 下單。</div>
+    <fieldset><legend>要通知的事件</legend>
+      <label>掛單（限價單價位出現，附 SL / TP1–4）<input type="checkbox" name="limit"></label>
+      <label>進場（掛單成交 / 收盤市價進場）<input type="checkbox" name="entry"></label>
+      <label>出場（TP / 保本 / 停損，會回頭在進場卡片打勾）<input type="checkbox" name="exit"></label>
+      <label>掛單取消（沒成交就作廢，要去 MT5 刪單）<input type="checkbox" name="cancel"></label>
+      <label>CRT 確認（C2 收盤確認，還沒有進場價，量會比較多）<input type="checkbox" name="confirm"></label>
+      <label>系統警示（MT5 斷線、掃描失敗；同一種 30 分鐘最多一則）<input type="checkbox" name="alerts"></label>
+    </fieldset>
+    <fieldset><legend>Discord</legend>
+      <label>Webhook <span id="hookSt" class="muted"></span><input name="hook" type="password" placeholder="https://discord.com/api/webhooks/…（留空 = 不改）" autocomplete="off"></label>
+      <div class="row" style="justify-content:flex-start;gap:8px;align-items:center"><button type="button" id="tMt5">測試 MT5</button><button type="button" id="tDis">測試頻道</button><span id="testMsg" class="note"></span></div>
+    </fieldset>
+    <div class="row" style="justify-content:flex-end;gap:8px"><button value="cancel">取消</button><button type="button" id="saveSet">儲存</button></div>
+  </form>
+</dialog>
+<script>
+const $ = id => document.getElementById(id);
+let S = null, sel = localStorage.getItem("crtSel") || "", chart, series, lines = [], chartKey = "";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = v => v == null ? "—" : Math.round(v * 100) + "%";
+function fmtT(ms) {
+  if (!ms) return "—";
+  const tz = (S && S.config && S.config.tz) || "Asia/Taipei";
+  return new Intl.DateTimeFormat("zh-TW", {timeZone: tz, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false}).format(ms);
+}
+function px(sym, v) {
+  if (v == null) return "—";
+  const d = (S.symbols[sym] || {}).dec ?? 5;
+  return Number(v).toFixed(d);
+}
+const dirTag = d => d < 0 ? '<span class="tag S">空</span>' : '<span class="tag L">多</span>';
+const stCls = s => s === "持倉中" ? "st hold" : s === "掛單中" ? "st lim" : "st";
+
+function entryCell(sym, c) {
+  if (c.entry) return `${px(sym, c.entry.price)} <span class="muted">${esc(c.entry.name)}</span>`;
+  if (c.levels.length) return c.levels.map(l => `${px(sym, l.price)} <span class="muted">${esc(l.name)}</span>`).join("<br>");
+  return '<span class="muted">—</span>';
+}
+function tpCell(sym, c, i) {
+  const v = c.tps[i];
+  if (v == null) return "—";
+  if (i === 0 && c.t1Skip) return `<span class="muted">${px(sym, v)} 略過</span>`;
+  const rr = c.rr[i] != null ? ` <span class="muted">${c.rr[i].toFixed(1)}R</span>` : "";
+  return (c.hits[i] ? '<span class="hit">✓ ' : "<span>") + px(sym, v) + "</span>" + rr;
+}
+
+function renderCards() {
+  const box = $("cards"), syms = Object.keys(S.symbols);
+  if (!sel || !S.symbols[sel]) sel = syms[0] || "";
+  box.innerHTML = syms.map(sym => {
+    const v = S.symbols[sym] || {}, q = v.quote, c = (v.crts || [])[0];
+    let body = "";
+    if (v.error) body += `<div class="err">${esc(v.error)}</div>`;
+    if (c) {
+      body += `<div class="row"><span>${dirTag(c.dir)} <span class="${stCls(c.status)}">${esc(c.status)}</span></span><span class="muted">M${c.model}${c.sess ? " · " + esc(c.sess) : ""}</span></div>`;
+      if (c.entry) {
+        let mtm = "";
+        const risk = c.dir < 0 ? c.sl - c.entry.price : c.entry.price - c.sl;
+        if (q && risk > 0) { const now = c.dir < 0 ? q.ask : q.bid; mtm = ` · 浮動 ${(((c.dir < 0 ? c.entry.price - now : now - c.entry.price)) / risk).toFixed(2)}R`; }
+        body += `<div class="row"><span>進場 ${px(sym, c.entry.price)}</span><span class="muted">${esc(c.entry.name)}${mtm}</span></div>`;
+        body += `<div class="row"><span>SL ${px(sym, c.slNow ?? c.sl)}</span><span class="muted">已實現 ${c.rz.toFixed(2)}R · 剩 ${Math.round(c.wRem * 100)}%</span></div>`;
+      } else if (c.levels.length) {
+        body += c.levels.map(l => `<div class="row"><span>掛單 ${px(sym, l.price)}</span><span class="muted">${esc(l.name)}</span></div>`).join("");
+        body += `<div class="row"><span>SL ${px(sym, c.sl)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
+      } else {
+        body += `<div class="row"><span class="muted">區間 ${px(sym, c.rL)} – ${px(sym, c.rH)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
+      }
+      if (c.entry || c.levels.length)
+        body += `<div class="tps">${[0,1,2,3].map(i => `<div class="row"><span>TP${i+1}</span><span>${tpCell(sym, c, i)}</span></div>`).join("")}</div>`;
+      const more = v.crts.length - 1;
+      if (more > 0) body += `<div class="note" style="margin-top:4px">另外 ${more} 個進行中</div>`;
+    } else if (!v.error) {
+      body += '<div class="muted">目前沒有進行中的 CRT</div>';
+    }
+    const last = (v.events || []).slice(-1)[0];
+    if (last) body += `<div class="note" style="margin-top:4px">最近：${fmtT(last.t)} ${esc(last.title.replace(/^\S+\s/, ""))}</div>`;
+    return `<div class="card${sym === sel ? " sel" : ""}" data-sym="${esc(sym)}"><div class="top"><span class="sym">${esc(sym)}</span><span class="px">${q ? px(sym, q.bid) : ""}</span></div>${body}</div>`;
+  }).join("");
+  box.querySelectorAll(".card").forEach(el => el.onclick = () => { sel = el.dataset.sym; localStorage.setItem("crtSel", sel); renderCards(); loadChart(true); });
+}
+
+function renderActive() {
+  const rows = [];
+  for (const [sym, v] of Object.entries(S.symbols))
+    for (const c of v.crts || [])
+      rows.push(`<tr><td>${esc(sym)}</td><td>${dirTag(c.dir)}</td><td class="${stCls(c.status)}">${esc(c.status)}</td><td>${fmtT(c.t1)}</td>
+        <td>${px(sym, c.rH)} / ${px(sym, c.rL)}</td><td>${esc(c.kl || "—")}</td><td>M${c.model}${c.sess ? " · " + esc(c.sess) : ""}${c.tbs ? " · TBS" : ""}</td>
+        <td>${entryCell(sym, c)}</td><td>${px(sym, c.slNow ?? c.sl)}</td>${[0,1,2,3].map(i => `<td>${tpCell(sym, c, i)}</td>`).join("")}
+        <td class="muted">${esc([c.poor, c.note].filter(Boolean).join(" · "))}</td></tr>`);
+  $("active").innerHTML = rows.join("") || '<tr><td colspan="14" class="muted">目前沒有</td></tr>';
+}
+
+function renderPos() {
+  const a = S.account;
+  if (!a || (!a.positions.length && !a.orders.length)) { $("posBox").style.display = "none"; return; }
+  $("posBox").style.display = "";
+  const OT = {2: "Buy Limit", 3: "Sell Limit", 4: "Buy Stop", 5: "Sell Stop"};
+  $("pos").innerHTML = a.positions.map(p => `<tr><td>${esc(p.symbol)}</td><td>${p.side === "空" ? '<span class="bear">空</span>' : '<span class="bull">多</span>'}</td><td>${p.volume}</td>
+      <td>${p.price}</td><td>${p.sl || "—"}</td><td>${p.tp || "—"}</td><td>${p.now}</td><td class="${p.profit < 0 ? "bear" : "bull"}">${p.profit.toFixed(2)}</td></tr>`).join("")
+    + a.orders.map(o => `<tr><td>${esc(o.symbol)}</td><td class="muted">${OT[o.type] || "掛單"}</td><td>${o.volume}</td><td>${o.price}</td><td>${o.sl || "—"}</td><td>${o.tp || "—"}</td><td></td><td class="muted">未成交</td></tr>`).join("");
+}
+
+let openEv = new Set();
+function renderEvents() {
+  const fs = $("fSym"), cur = fs.value, syms = Object.keys(S.symbols);
+  if (fs.options.length - 1 !== syms.length) fs.innerHTML = '<option value="">全部商品</option>' + syms.map(s => `<option>${esc(s)}</option>`).join("");
+  fs.value = cur;
+  const fk = $("fKind").value, KN = {limit: "掛單", entry: "進場", exit: "出場", cancel: "取消", confirm: "確認"};
+  let all = [];
+  for (const [sym, v] of Object.entries(S.symbols)) if (!fs.value || fs.value === sym) for (const e of v.events || []) if (!fk || e.kind === fk) all.push([sym, e]);
+  all.sort((a, b) => b[1].t - a[1].t);
+  all = all.slice(0, 120);
+  $("events").innerHTML = all.map(([sym, e]) => {
+    const id = sym + "|" + e.t + "|" + e.kind + "|" + e.key + "|" + (e.sig ?? "") + "|" + e.price;
+    const dir = e.dir < 0 ? "bear" : e.dir > 0 ? "bull" : "";
+    const row = `<tr class="ev" data-id="${esc(id)}"><td>${fmtT(e.t)}</td><td>${esc(sym)}</td><td><span class="k ${e.kind}">${KN[e.kind] || e.kind}</span></td>
+      <td class="${dir}" style="white-space:normal">${esc(e.title)}</td><td>${e.price != null ? px(sym, e.price) : ""}</td><td>${e.sl != null ? px(sym, e.sl) : ""}</td></tr>`;
+    return row + (openEv.has(id) ? `<tr><td colspan="6"><pre class="card-text">${esc(e.text)}</pre></td></tr>` : "");
+  }).join("") || '<tr><td colspan="6" class="muted">沒有</td></tr>';
+  $("events").querySelectorAll("tr.ev").forEach(tr => tr.onclick = () => { const id = tr.dataset.id; openEv.has(id) ? openEv.delete(id) : openEv.add(id); renderEvents(); });
+}
+
+function renderStats() {
+  const rows = Object.entries(S.symbols).filter(([, v]) => v.stats).map(([sym, v]) => {
+    const s = v.stats, r = s.rPer;
+    return `<tr><td>${esc(sym)}</td><td>${s.settled}</td><td>${pct(s.tp1)}</td><td>${pct(s.tp2)}</td><td>${pct(s.tp3)}</td><td>${pct(s.tp4)}</td>
+      <td>${pct(s.stopFirst)}</td><td class="${r == null ? "" : r < 0 ? "bear" : "bull"}">${r == null ? "—" : (r >= 0 ? "+" : "") + r.toFixed(2)}</td>
+      <td>${(s.rSum >= 0 ? "+" : "") + s.rSum.toFixed(1)}</td><td>${s.setups}</td><td>${s.noTrigger}</td><td>${s.filtered}</td>
+      <td class="muted" style="white-space:normal">${Object.entries(s.kinds).map(([k, n]) => `${esc(k)} ${n}`).join(" · ")}</td></tr>`;
+  });
+  $("stats").innerHTML = rows.join("") || '<tr><td colspan="13" class="muted">—</td></tr>';
+  const f = Object.values(S.symbols).map(v => v.from).filter(Boolean);
+  $("statNote").textContent = f.length ? `從 ${fmtT(Math.min(...f))} 到現在的 5 分 K 回放（每次掃描重算，最近 ${S.config.ltf_bars} 根）` : "";
+  $("params").textContent = JSON.stringify(S.config.params, null, 1);
+}
+
+function renderHeader() {
+  const a = S.account, me = S.mt5Error;
+  $("dMt5").className = "dot " + (me ? "bad" : a ? "ok" : "");
+  $("pMt5").title = me || (a ? `${a.server} #${a.login}` : "");
+  if (a) {
+    $("pAcct").textContent = `${a.mode} #${a.login} · 餘額 ${a.balance.toFixed(2)} · 淨值 ${a.equity.toFixed(2)} ${a.currency}`;
+    $("pAcct").className = "pill" + (a.balance <= 0 ? " bad" : "");
+  }
+  const c = S.config || {};
+  $("pTf").textContent = `${c.crt_tf || "—"} CRT → ${c.ltf || "—"} 進場 · KL ${c.kl_tf || "—"}`;
+  $("pScan").textContent = S.lastScan ? `上次掃描 ${fmtT(S.lastScan)}（${S.scanSec}s）` : "掃描中…";
+  $("pDiscord").textContent = c.discord ? `Discord 推播中 · 本次送 ${S.lastSent ?? 0} 則` : "Discord 未設定（只顯示）";
+  $("pDiscord").className = "pill" + (c.discord ? "" : " warn");
+  const al = [];
+  if (S.cfgError) al.push(S.cfgError);
+  if (S.scanError) al.push("掃描失敗：" + S.scanError);
+  if (me) al.push("MT5：" + me);
+  if (a && a.balance <= 0) al.push("模擬帳戶餘額是 0（逆勢攤平爆倉）——要手動下單，先到 Exness 個人專區幫這個模擬帳戶加值（Deposit）。訊號照常顯示。");
+  $("alerts").innerHTML = al.map(t => `<div class="section err" style="font-size:13px">${esc(t)}</div>`).join("");
+}
+function tick() {
+  if (!S || !S.nextScan) return;
+  const s = Math.max(0, Math.round((S.nextScan - Date.now()) / 1000));
+  $("pNext").textContent = `下次掃描 ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function initChart() {
+  chart = LightweightCharts.createChart($("chart"), {
+    layout: {background: {color: "#161a22"}, textColor: "#8a93a3"},
+    grid: {vertLines: {color: "#1f2430"}, horzLines: {color: "#1f2430"}},
+    timeScale: {timeVisible: true, secondsVisible: false, borderColor: "#262c38", rightOffset: 8},
+    rightPriceScale: {borderColor: "#262c38"}, crosshair: {mode: 0}, autoSize: true,
+  });
+  series = chart.addCandlestickSeries({upColor: "#17a88f", downColor: "#ff5577", borderVisible: false, wickUpColor: "#17a88f", wickDownColor: "#ff5577"});
+}
+function shortExit(t) {
+  const m = t.match(/✓ TP\d|保本出場|停損|逾時|全部出場/g);
+  return m ? m[m.length - 1].replace("✓ ", "") : "出";
+}
+async function loadChart(force) {
+  if (!sel || !S) return;
+  const key = sel + "|" + S.lastScan;
+  if (!force && key === chartKey) { drawLines(); return; }
+  chartKey = key;
+  const r = await fetch("/api/chart?sym=" + encodeURIComponent(sel)).then(r => r.json()).catch(() => null);
+  if (!r) return;
+  $("chartTitle").textContent = sel;
+  series.setData(r.bars);
+  const KS = {1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤", 6: "⑥", 7: "⑦", 8: "⑧"};
+  const mk = [];
+  for (const e of r.events) {
+    if (e.kind === "entry") mk.push({time: e.time, position: e.dir < 0 ? "aboveBar" : "belowBar", shape: e.dir < 0 ? "arrowDown" : "arrowUp", color: e.dir < 0 ? "#ff5577" : "#17a88f", text: KS[e.sig] || "進"});
+    else if (e.kind === "exit") mk.push({time: e.time, position: e.dir < 0 ? "belowBar" : "aboveBar", shape: "circle", color: "#e8a21b", text: shortExit(e.title)});
+    else if (e.kind === "confirm") mk.push({time: e.time, position: "aboveBar", shape: "circle", color: "#a77bff", text: "C" + (e.dir < 0 ? "↓" : "↑")});
+  }
+  mk.sort((a, b) => a.time - b.time);
+  series.setMarkers(mk);
+  if (force) chart.timeScale().fitContent();
+  drawLines();
+}
+function drawLines() {
+  lines.forEach(l => series.removePriceLine(l));
+  lines = [];
+  const v = S.symbols[sel];
+  if (!v) return;
+  const add = (price, color, title, style = 0, width = 1) => price != null && lines.push(series.createPriceLine({price, color, title, lineStyle: style, lineWidth: width, axisLabelVisible: true}));
+  for (const c of (v.crts || []).filter(c => c.confirmed || c.entered || c.levels.length).slice(0, 2)) {
+    const d = c.dir < 0 ? "空" : "多";
+    add(c.rH, "#e8a21b", "CRH", 2); add(c.rL, "#e8a21b", "CRL", 2);
+    if (c.entry) add(c.entry.price, "#4c8dff", `${d} 進場`, 0, 2);
+    for (const l of c.levels) add(l.price, "#4c8dff", `${d} 掛 ${l.name.slice(0, 1)}`, 1);
+    add(c.slNow ?? c.sl, "#ff3b5c", "SL", 0, 2);
+    c.tps.forEach((t, i) => !(i === 0 && c.t1Skip) && add(t, "#2fd0b2", `TP${i + 1}${c.hits[i] ? " ✓" : ""}`, 1));
+  }
+  $("chartTitle").textContent = sel + (v.quote ? `  ${px(sel, v.quote.bid)}` : "");
+}
+
+async function poll() {
+  try {
+    S = await fetch("/api/state").then(r => r.json());
+    renderHeader(); renderCards(); renderActive(); renderPos(); renderEvents(); renderStats(); tick();
+    await loadChart(false);
+  } catch (e) {
+    $("alerts").innerHTML = `<div class="section err">連不到儀表板（視窗關掉了？）：${esc(e)}</div>`;
+  }
+}
+// ───────────── 商品選擇（打幾個字就列出相關的）─────────────
+let MY = {symbols: [], notify: [], alerts: true, discord: false}, symItems = [], symIdx = 0, symTimer = null;
+const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})}).then(r => r.json());
+async function loadSettings() {
+  MY = await fetch("/api/settings").then(r => r.json());
+  renderChips();
+}
+function renderChips() {
+  $("chips").innerHTML = MY.symbols.map(s => `<span class="chip">${esc(s)}<b data-s="${esc(s)}" title="移除 ${esc(s)}">×</b></span>`).join("")
+    || '<span class="note">還沒有商品</span>';
+  $("chips").querySelectorAll("b").forEach(b => b.onclick = () => saveSyms(MY.symbols.filter(x => x !== b.dataset.s)));
+}
+async function saveSyms(list) {
+  $("symMsg").textContent = "儲存中…";
+  const r = await post("/api/symbols", {symbols: list}).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { $("symMsg").textContent = r.error || "儲存失敗"; return; }
+  MY.symbols = r.symbols;
+  renderChips();
+  $("symMsg").textContent = "已儲存，重新掃描中…（新加的商品不會補發舊訊號）";
+  setTimeout(() => { $("symMsg").textContent = ""; poll(); }, 2500);
+}
+async function searchSym() {
+  const q = $("symQ").value.trim();
+  if (!q) { hideDrop(); return; }
+  const r = await fetch("/api/search?q=" + encodeURIComponent(q)).then(r => r.json()).catch(e => ({items: [], error: String(e)}));
+  if ($("symQ").value.trim() !== q) return;            // 已經又打了別的字
+  symItems = r.items || []; symIdx = 0; drawDrop(r.error);
+}
+function drawDrop(err) {
+  const d = $("symList");
+  d.style.display = "block";
+  if (err) { d.innerHTML = `<div class="it err">${esc(err)}</div>`; return; }
+  if (!symItems.length) { d.innerHTML = '<div class="it muted">找不到，換個字試試（例如 xau、gold、nas、spx、eu、btc）</div>'; return; }
+  d.innerHTML = symItems.map((x, i) => `<div class="it${i === symIdx ? " on" : ""}" data-i="${i}"><span><b>${esc(x.name)}</b> <span class="muted">${esc(x.desc)}</span></span>
+    <span class="muted">${esc(x.group)}${MY.symbols.includes(x.name) ? " · 已加入" : ""}${x.closeOnly ? " · 只能平倉" : ""}</span></div>`).join("");
+  d.querySelectorAll(".it[data-i]").forEach(el => el.onmousedown = e => { e.preventDefault(); pickSym(+el.dataset.i); });
+  const on = d.querySelector(".it.on"); if (on) on.scrollIntoView({block: "nearest"});
+}
+function hideDrop() { $("symList").style.display = "none"; }
+function pickSym(i) {
+  const x = symItems[i];
+  if (!x) return;
+  $("symQ").value = ""; hideDrop();
+  if (!MY.symbols.includes(x.name)) saveSyms([...MY.symbols, x.name]);
+}
+$("symQ").oninput = () => { clearTimeout(symTimer); symTimer = setTimeout(searchSym, 120); };
+$("symQ").onkeydown = async e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); symIdx = Math.min(symIdx + 1, symItems.length - 1); drawDrop(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); symIdx = Math.max(symIdx - 1, 0); drawDrop(); }
+  else if (e.key === "Enter") { e.preventDefault(); if (symTimer) { clearTimeout(symTimer); symTimer = null; await searchSym(); } pickSym(symIdx); }
+  else if (e.key === "Escape") hideDrop();
+};
+$("symQ").onblur = () => setTimeout(hideDrop, 150);
+$("symQ").onfocus = () => { if ($("symQ").value.trim()) searchSym(); };
+
+// ───────────── 通知設定 ─────────────
+const KINDS = ["limit", "entry", "exit", "cancel", "confirm"];
+$("btnSet").onclick = async () => {
+  await loadSettings();
+  const f = $("setForm");
+  KINDS.forEach(k => f[k].checked = MY.notify.includes(k));
+  f.alerts.checked = MY.alerts; f.hook.value = "";
+  $("hookSt").textContent = MY.discord ? "已設定" : "未設定";
+  $("testMsg").textContent = "";
+  $("dlg").showModal();
+};
+$("saveSet").onclick = async () => {
+  const f = $("setForm"), body = {notify: KINDS.filter(k => f[k].checked), alerts: f.alerts.checked};
+  if (f.hook.value.trim()) body.webhook = f.hook.value.trim();
+  const r = await post("/api/settings", body);
+  if (!r.ok) { $("testMsg").textContent = r.error; return; }
+  $("dlg").close(); loadSettings(); poll();
+};
+$("tDis").onclick = async () => {
+  $("testMsg").textContent = "發送中…";
+  if ($("setForm").hook.value.trim()) {                 // 新填的 Webhook 先存再測
+    const s = await post("/api/settings", {webhook: $("setForm").hook.value.trim()});
+    if (!s.ok) { $("testMsg").textContent = s.error; return; }
+    $("hookSt").textContent = "已設定";
+  }
+  const r = await post("/api/test/discord");
+  $("testMsg").textContent = r.ok ? "✅ 已發送，去 Discord 看看" : "❌ " + r.error;
+};
+$("tMt5").onclick = async () => {
+  $("testMsg").textContent = "連線中…";
+  const r = await post("/api/test/mt5");
+  $("testMsg").textContent = r.ok ? "✅ " + r.msg : "❌ " + r.error;
+};
+
+$("fSym").onchange = renderEvents; $("fKind").onchange = renderEvents;
+$("btnScan").onclick = async () => { $("btnScan").disabled = true; await post("/api/scan"); setTimeout(() => { $("btnScan").disabled = false; poll(); }, 4000); };
+initChart();
+loadSettings();
+poll().then(() => loadChart(true));
+setInterval(poll, 5000);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

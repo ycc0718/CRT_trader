@@ -276,21 +276,39 @@ def _ob_calc(bars: list[Bar]) -> list[tuple]:
 
 
 class HTF:
-    """Higher-timeframe series; get(t) returns what request.security(..., x[1], lookahead_on) sees."""
+    """Higher-timeframe series; prev(t) is the bar request.security(..., x[1], lookahead_on) sees.
+
+    用實際的 HTF K 線清單找（bisect），不用時間除法：外匯 / 黃金 / 指數有週末、每日休市，
+    「前一根 HTF K」不一定剛好是 period 之前那根；幣圈 24 小時連續時結果跟除法一樣。
+    """
 
     def __init__(self, bars: list[Bar], period: int):
         self.period = period
         self.bars = bars
-        self.pos = {b.t: i for i, b in enumerate(bars)}
+        self.ts = [b.t for b in bars]
         self.atr = _rma_atr(bars)
         self.ob = _ob_calc(bars)
 
+    def _find(self, t: int) -> tuple[int, bool]:
+        """(k, inside)：k = 開盤時間 ≤ t 的最後一根；inside = t 落在這根 K 的時間範圍內。"""
+        k = bisect.bisect_right(self.ts, t) - 1
+        return k, k >= 0 and t < self.ts[k] + self.period
+
     def bucket(self, t: int) -> int:
+        """包含 t 的那根 HTF K 的開盤時間（資料裡沒有那根時，從前一根往後推算）。"""
+        k, inside = self._find(t)
+        if inside:
+            return self.ts[k]
+        if k >= 0:
+            return self.ts[k] + (t - self.ts[k]) // self.period * self.period
         return t - t % self.period
 
     def prev(self, t: int) -> int | None:
         """Index of the previous CLOSED HTF bar for chart time t."""
-        return self.pos.get(self.bucket(t) - self.period)
+        k, inside = self._find(t)
+        if inside:
+            return k - 1 if k >= 1 else None
+        return k if k >= 0 else None
 
 
 def ny_dt(t: int) -> datetime:

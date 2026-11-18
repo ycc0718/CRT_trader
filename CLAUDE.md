@@ -8,25 +8,35 @@
 |---|---|
 | `crt_engine.py` | CRT 邏輯，逐根 LTF K 執行，順序跟 Pine 一樣（改邏輯時兩邊要一起改，保持訊號一致） |
 | `okx.py` | OKX 公開行情（不用 key）；`candles()`、`instruments()` |
+| `mt5src.py` | MT5 行情（**唯讀**，不下單）：`candles()` / `tick_size()` / `resolve()` / `search()` 跟 okx.py 同介面，另有 `account()`（帳戶 + 所有持倉 / 掛單，含手動單）、`quote()`；伺服器時間用最新報價對本機時鐘換成 UTC |
 | `notify.py` | Discord webhook（`?wait=true` 拿訊息 id，`edit()` 回頭在 TP 打勾）；也支援 Telegram |
-| `scan.py` | 主程式：`python scan.py`（掃一次，用 `state/sent.json` 去重）、`--loop`（常駐，每根 5 分 K 收盤後 8 秒掃）、`--stateless`（排程準時的雲端用）、`--replay [--csv]`（列出最近 4 天訊號，跟 TradingView 對）、`--search sol`、`--hello`（連線測試訊息） |
-| `config.json` | 商品、時間框架、各開關（`params` 對應 Pine 的 input，沒寫的用 `crt_engine.Params` 預設） |
-| `.github/workflows/scan.yml` | 目前的部署：GitHub Actions（push 時發連線測試；cron-job.org 每 5 分鐘用 workflow_dispatch 觸發；state 用 actions/cache） |
+| `scan.py` | 主程式：`python scan.py`（掃一次，用 `$CRT_DATA_DIR/sent.json` 去重，沒設就 `state/`）、`--loop`（常駐，每根 5 分 K 收盤後 8 秒掃）、`--stateless`（排程準時的雲端用）、`--replay [--csv]`（列出最近的訊號，跟 TradingView 對）、`--search sol`、`--hello`（連線測試訊息）；`--config config.mt5.json` 換成 MT5 行情（config 的 `source`：`okx` / `mt5`） |
+| `dash.py` / `dash.html` | **本機 CRT 儀表板（現行部署）**（`python dash.py` → http://127.0.0.1:8011）：同一個 process 裡跑 `scan_once`（推 Discord、去重、卡片打勾），網頁顯示每個商品進行中的 CRT（掃蕩中 / 已確認 / 掛單 / 持倉）、K 線圖 + 價位線、訊號紀錄（點開是完整卡片）、回放統計、MT5 帳戶與手動持倉。商品選擇（打幾個字 → `/api/search` → `mt5src.search`：代號開頭 > 常用叫法 `ALIAS`（gold / 黃金 / nas…）> 代號中間 > 英文說明，市場報價有的排前面）和通知設定（事件開關、系統警示、Webhook、測試頻道 / MT5，仿 Stock_PY 8010 的設定視窗）存在 `~/crt-dash-data/settings.json`，蓋過 config 檔；Webhook 寫進 `.env`。POST 只收 `application/json`（擋跨站表單）。新加的商品不補發舊訊號（`scan_once` 的 `new_sym`）；config 每次掃描重讀（不用重開）；資料 / log 在 `~/crt-dash-data` |
+| `config.json` | OKX 用：商品、時間框架、各開關（`params` 對應 Pine 的 input，沒寫的用 `crt_engine.Params` 預設） |
+| `config.mt5.json` | 本機 MT5 用：`mt5_path`、預設商品（Exness 帶 `m`：XAUUSDm、EURUSDm、GBPUSDm、USDJPYm、USTECm、US500m；網頁上改的優先）、`ltf_bars` 3000、`htf_bars` 600、策略 `params` |
 
-環境變數：`DISCORD_WEBHOOK_URL`（必要）、`SYMBOLS`（例如 `BTC,ETH,SOL`，會自動補成 `-USDT-SWAP`）、`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`（選用）。
+GitHub Actions 已停用（2026-11-19，使用者不用了，workflow 已刪；cron-job.org 那邊的觸發要使用者自己刪）。`--stateless` 是當時雲端排程用的，留著沒用到。
+
+環境變數：`DISCORD_WEBHOOK_URL`（必要；本機放 `.env`，已 gitignore）、`SYMBOLS`（例如 `BTC,ETH,SOL`，會自動補成 `-USDT-SWAP`）、`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`（選用）、`CRT_DATA_DIR`、`CRT_PORT`、`MT5_PATH`（蓋過 config 的 `mt5_path`）。
+
+## 本機部署（2026-11-18 起）
+
+- 使用者的 Windows 電腦，跟 `Stock_PY`（`fex_upsidedown` 逆勢攤平移植過去的那套）放一起：`Stock_PY\start_local.ps1`（桌面捷徑「Nexus 儀表板」）會用 `CRT_trader\venv` 開 `dash.py` 在 **8011**——原本逆勢攤平的埠；逆勢攤平帳號爆倉，已停用。
+- 行情來自 `C:\Users\user\claude\MT5\MT5_Strategy1`（Exness 模擬帳號，原逆勢攤平那個），**程式不下單**，使用者看訊號自己手動下在這個帳號。
+- Discord 用原本逆勢攤平的頻道（`.env` 的 `DISCORD_WEBHOOK_URL`，值抄自 `Stock_PY/.env` 的 `DISCORD_WEBHOOK_URL_AVG`）。
+- venv：`py -3.11 -m venv venv`、`venv\Scripts\pip install -r requirements.txt`（Windows 沒有 IANA 時區資料，`tzdata` 一定要裝）。
 
 ## 接下來要做（使用者的計畫）
 
-1. **搬到使用者自己的主機**，跟 `fex_upsidedown` 專案放在一起。用 `python scan.py --loop` 常駐（systemd / Docker / pm2 擇一），`state/` 要放在持久的位置。搬好後把 GitHub Actions 的排程和 cron-job.org 停掉，避免重複發訊息。
-2. **外匯 / 黃金 / 指數**（EURUSD、XAUUSD、US100、SPX500）：OKX 只有幣，要另外接資料來源，二選一（還沒決定）：
-   - OANDA v20 API（模擬帳戶 token；`EUR_USD`、`XAU_USD`、`NAS100_USD`、`SPX500_USD`；TradingView 的 `OANDA:` 報價可直接對照）
-   - MT5 Python 套件（要 Windows + MT5 開著；報價跟使用者實際下單的券商一致）
-   - **引擎要先改**：`HTF.bucket()` / `HTF.prev()` 現在假設 24 小時、UTC 對齊（幣圈）。外匯是紐約 17:00 換日、週末休市、指數 / 黃金每天有休市時段 → 改成用 HTF K 線清單 bisect 找「包含這根 LTF 的 HTF K」與前一根，不要用時間除法。
+1. **訊號微調**：使用者說還有很多地方要調。調參數改 `config.mt5.json` 的 `params`（儀表板下一次掃描就套用）；改判斷邏輯時 `crt_engine.py` 和 Pine 要一起改，並用 `--replay` 前後比對。
+2. **不要做自動下單**：使用者明講只要通知，看到訊息自己去 MT5 手操。`mt5src.py` 只能有讀的函式。
+3. 外匯資料源已選 **MT5**（OANDA 沒做）。HTF 已改成用 K 線清單 bisect 找「包含這根 LTF 的 HTF K」和前一根（`HTF._find`），週末 / 每日休市都對；幣圈結果跟原本時間除法逐筆相同（BTC / ETH / SOL 1200 根 5 分 K 比過）。這是資料對齊，不是交易邏輯，Pine 不用改（`request.security` 本來就照實際 K 線）。
+4. 注意：MT5（Exness）日線是 UTC 00:00 換日，TradingView 外匯日線是紐約 17:00；PDH / PDL、日線 OB / FVG 會跟 TradingView 外匯圖不一樣，以 MT5 為準（使用者在 MT5 下單）。
 
 ## 對訊號時已知可能不一致的地方
 
 - `ta.pivothigh/pivotlow` 遇到相同高 / 低點的判斷方式（這裡用左邊可相等、右邊要嚴格）
-- 掃描器只看最近約 4 天的 5 分 K，很早以前形成的 KL 區塊可能不同
+- 掃描器只看最近的 5 分 K（OKX 約 4 天、MT5 3000 根約 2 週），很早以前形成的 KL 區塊可能不同
 - TradingView 即時 K 會在收盤前觸發成交；掃描器只看收盤的 K
 
 ## 訊號規則重點（改程式前先看懂）

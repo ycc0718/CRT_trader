@@ -5,6 +5,10 @@ CRT 雲端掃描器：抓 OKX K 線 → 跑 CRT 邏輯（跟 TradingView 指標�
   python scan.py --loop       一直跑，每根 LTF K 收盤後掃一次（VPS / Cloud Run 用）
   python scan.py --replay     不送通知，列出這段資料裡所有的訊號（拿來跟 TradingView 對）
   python scan.py --replay --csv out.csv
+  python scan.py --config config.mt5.json ...   用 MT5 行情（外匯 / 黃金 / 指數；Windows + MT5 開著）
+
+行情來源看 config 的 `source`："okx"（預設）或 "mt5"。
+已送通知的紀錄放在 $CRT_DATA_DIR/sent.json（沒設就是 ./state/sent.json）。
 """
 from __future__ import annotations
 
@@ -23,11 +27,23 @@ import okx
 from crt_engine import HTF, TF_MS, Engine, Params
 
 ROOT = Path(__file__).resolve().parent
-STATE = ROOT / "state" / "sent.json"
+
+
+def state_file() -> Path:
+    return Path(os.environ.get("CRT_DATA_DIR") or ROOT / "state") / "sent.json"
 
 
 def load_cfg(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def src(cfg: dict):
+    """行情來源模組：okx 或 mt5src（介面相同：candles / tick_size）。"""
+    if cfg.get("source", "okx") == "mt5":
+        import mt5src
+        mt5src.configure(cfg.get("mt5_path", ""))
+        return mt5src
+    return okx
 
 
 def build_params(cfg: dict, tick: float) -> Params:
@@ -36,8 +52,10 @@ def build_params(cfg: dict, tick: float) -> Params:
     return p
 
 
-def resolve_symbols(names: list[str]) -> dict[str, float]:
-    """BTC / sol / ETH-USDT-SWAP 都可以；找不到就在 log 印出相近的。"""
+def resolve_symbols(names: list[str], cfg: dict | None = None) -> dict[str, float]:
+    """BTC / sol / ETH-USDT-SWAP 都可以；找不到就在 log 印出相近的。MT5 用 MT5 上的名稱（例如 XAUUSDm）。"""
+    if cfg is not None and cfg.get("source", "okx") == "mt5":
+        return src(cfg).resolve(names)
     allx = okx.instruments("SWAP")
     out = {}
     for n in names:
@@ -55,15 +73,19 @@ def resolve_symbols(names: list[str]) -> dict[str, float]:
 
 
 def run_symbol(sym: str, cfg: dict, tick: float | None = None) -> Engine:
-    tick = tick if tick is not None else okx.tick_size(sym)
+    s = src(cfg)
+    tick = tick if tick is not None else s.tick_size(sym)
     p = build_params(cfg, tick)
-    ltf = okx.candles(sym, cfg.get("ltf", "5m"), int(cfg.get("ltf_bars", 1200)))
-    h = HTF(okx.candles(sym, p.crt_tf, 300, closed_only=False), TF_MS[p.crt_tf])
+    ltf = s.candles(sym, cfg.get("ltf", "5m"), int(cfg.get("ltf_bars", 1200)))
+    hn = int(cfg.get("htf_bars", 300))
+    h = HTF(s.candles(sym, p.crt_tf, hn, closed_only=False), TF_MS[p.crt_tf])
     kl = None
     if TF_MS[p.kl_tf] > TF_MS[p.crt_tf] and p.kl_tf != "1D":
-        kl = HTF(okx.candles(sym, p.kl_tf, 300, closed_only=False), TF_MS[p.kl_tf])
-    d = HTF(okx.candles(sym, "1D", 300, closed_only=False), TF_MS["1D"])
-    return Engine(p, sym, h, kl, d).run(ltf)
+        kl = HTF(s.candles(sym, p.kl_tf, hn, closed_only=False), TF_MS[p.kl_tf])
+    d = HTF(s.candles(sym, "1D", hn, closed_only=False), TF_MS["1D"])
+    eng = Engine(p, sym, h, kl, d).run(ltf)
+    eng.ltf_bars = ltf          # 給儀表板畫圖用
+    return eng
 
 
 def fmt_t(ms: int, tz: str) -> str:
@@ -73,7 +95,7 @@ def fmt_t(ms: int, tz: str) -> str:
 def load_state() -> tuple[dict, dict]:
     """sent：已送過的事件；msgs：進場卡片的 Discord 訊息（之後在 TP 後面打勾）。"""
     try:
-        js = json.loads(STATE.read_text(encoding="utf-8"))
+        js = json.loads(state_file().read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}, {}
     if "sent" not in js:  # 舊格式
@@ -85,8 +107,11 @@ def save_state(st: dict, msgs: dict) -> None:
     cutoff = time.time() * 1000 - 4 * 86_400_000
     st = {k: v for k, v in st.items() if v >= cutoff}
     msgs = {k: v for k, v in msgs.items() if v.get("t", 0) >= cutoff}
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps({"sent": st, "msgs": msgs}, ensure_ascii=False), encoding="utf-8")
+    f = state_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"sent": st, "msgs": msgs}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, f)
 
 
 def mark_card(m: dict, d: dict) -> None:
@@ -107,7 +132,8 @@ def _eid(sym: str, ev) -> str:
     return f"{sym}|{ev.key}|{ev.kind}|{ev.t}|{ev.data.get('sig', '')}|{ev.data.get('ev', '')}"
 
 
-def scan_once(cfg: dict, stateless: bool = False) -> int:
+def scan_once(cfg: dict, stateless: bool = False, results: dict | None = None) -> int:
+    """results：給儀表板用，每個商品放 Engine（失敗就放 Exception）。"""
     st, msgs = ({}, {}) if stateless else load_state()
     first_run = not st and not stateless
     now = time.time() * 1000
@@ -117,15 +143,26 @@ def scan_once(cfg: dict, stateless: bool = False) -> int:
     kinds = set(cfg.get("notify", ["limit", "entry", "exit", "cancel"]))
     tz = cfg.get("display_tz", "Asia/Taipei")
     sent = 0
-    ticks = resolve_symbols(cfg["symbols"])
+    ticks = resolve_symbols(cfg["symbols"], cfg)
+    if results is not None:
+        for name in cfg["symbols"]:
+            if name.strip() and name.strip() not in ticks and not any(k.startswith(name.strip().upper()) for k in ticks):
+                results[name.strip()] = RuntimeError("找不到這個商品")
     for sym, tick in ticks.items():
         try:
             eng = run_symbol(sym, cfg, tick)
         except Exception as e:  # 一個商品失敗不影響其他
             print(f"[{sym}] 失敗：{e}", file=sys.stderr)
+            if results is not None:
+                results[sym] = e
             continue
+        if results is not None:
+            results[sym] = eng
+        # 剛加進來的商品（紀錄裡沒有它）：跟第一次跑一樣，只送最近 15 分鐘的，舊的記成已送
+        new_sym = not first_run and not stateless and not any(k.startswith(sym + "|") for k in st)
+        look_s = 15 * 60_000 if new_sym else look
         todo = [ev for ev in eng.events
-                if ev.kind in kinds and _eid(sym, ev) not in st and ev.t + ltf_ms >= now - look]
+                if ev.kind in kinds and _eid(sym, ev) not in st and ev.t + ltf_ms >= now - look_s]
         # 同一根 K、同一個 CRT 的多張掛單合成一則
         groups: list[list] = []
         for ev in todo:
@@ -138,7 +175,11 @@ def scan_once(cfg: dict, stateless: bool = False) -> int:
             ev = g[0]
             text = eng.limitGroupText(g) if len(g) > 1 else ev.text
             close_t = ev.t + ltf_ms
-            info = notify.send(ev.kind, ev.data.get("dir", 0), text, fmt_t(close_t, tz) + "（K 棒收盤）")
+            try:
+                info = notify.send(ev.kind, ev.data.get("dir", 0), text, fmt_t(close_t, tz) + "（K 棒收盤）")
+            except Exception as e:  # Discord 暫時失敗：這則不記成已送，下次掃描再送；其他照常
+                print(f"[{sym}] 通知失敗（下次再送）：{e}", file=sys.stderr)
+                continue
             mk = f"{sym}|{ev.key}"
             if ev.kind == "entry" and info and info.get("id"):
                 msgs[mk] = dict(info, t=close_t)
@@ -150,7 +191,7 @@ def scan_once(cfg: dict, stateless: bool = False) -> int:
             for e in g:
                 st[_eid(sym, e)] = close_t
             sent += 1
-        if first_run:  # 第一次跑：把舊的都記成已送，避免一次灌一堆
+        if first_run or new_sym:  # 第一次跑 / 新商品：把舊的都記成已送，避免一次灌一堆
             for ev in eng.events:
                 st.setdefault(_eid(sym, ev), ev.t + ltf_ms)
     if not stateless:
@@ -163,7 +204,7 @@ def replay(cfg: dict, csv_path: str | None) -> None:
     tz = cfg.get("display_tz", "Asia/Taipei")
     ltf_ms = TF_MS[cfg.get("ltf", "5m")]
     rows = []
-    for sym, tick in resolve_symbols(cfg["symbols"]).items():
+    for sym, tick in resolve_symbols(cfg["symbols"], cfg).items():
         eng = run_symbol(sym, cfg, tick)
         print(f"\n===== {sym} =====")
         for ev in eng.events:
@@ -200,15 +241,17 @@ def main() -> None:
         cfg["symbols"] = os.environ["SYMBOLS"].split(",")
     if a.hello:
         lines = []
-        for sym, tick in resolve_symbols(cfg["symbols"]).items():
-            b = okx.candles(sym, cfg.get("ltf", "5m"), 1)[-1]
+        for sym, tick in resolve_symbols(cfg["symbols"], cfg).items():
+            b = src(cfg).candles(sym, cfg.get("ltf", "5m"), 1)[-1]
             lines.append(f"{sym}  最新收盤 {b.c}")
         notify.send("confirm", 0, "✅ CRT 掃描器連線正常\n" + "\n".join(lines) + "\n之後有新的掛單 / 進場 / 出場才會通知",
                     fmt_t(int(time.time() * 1000), cfg.get("display_tz", "Asia/Taipei")))
         return
     if a.search:
         q = a.search.upper()
-        print("\n".join(k for k in sorted(okx.instruments("SWAP")) if q in k) or "沒有找到")
+        found = ([f"{x['name']}  {x['desc']}  [{x['group']}]" for x in src(cfg).search(q)] if cfg.get("source") == "mt5"
+                 else [k for k in sorted(okx.instruments("SWAP")) if q in k])
+        print("\n".join(found) or "沒有找到")
         return
     if a.replay:
         replay(cfg, a.csv)
