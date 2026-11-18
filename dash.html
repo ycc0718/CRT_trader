@@ -191,9 +191,11 @@ function tpCell(sym, c, i) {
 
 // 停損從哪來：原始 SL（C2 掃點 / LTF OB）＋ 進場後移到哪
 function slNote(sym, c) {
-  const moved = c.slTag === "保本" ? "打到 TP1 後移到進場價（保本）" : c.slTag === "TP1" ? "打到 TP2 後移到 TP1" : c.slTag ? "已移動" : "";
+  const moved = c.slTag === "保本" ? (c.t1Skip ? "TP1 在進場價後面所以略過，打到 TP2 後移到進場價（保本）" : "打到 TP1 後移到進場價（保本）")
+    : c.slTag === "TP1" ? "打到 TP2 後移到 TP1" : c.slTag ? "已移動" : "";
   return esc((c.slTag ? `原始 SL ${px(sym, c.sl)} = ` : "SL = ") + (c.slWhy || "—") + (moved ? "；" + moved : ""));
 }
+const voidedTxt = (sym, c) => c.voided.map(l => `${esc(l.name.slice(0, 1))} ${px(sym, l.price)}`).join(" · ");
 let tickDir = {}, chartLast = 0, liveBar = {}, liveT = 0;
 
 function renderCards() {
@@ -212,6 +214,7 @@ function renderCards() {
         body += `<div class="row"><span>進場 ${px(sym, c.entry.price)}</span><span class="muted">${esc(c.entry.name)}${mtm}</span></div>`;
         body += `<div class="row"><span>SL ${px(sym, c.slNow ?? c.sl)}${c.slTag ? ` <span class="tag mv">${esc(c.slTag)}</span>` : ""}</span><span class="muted">已實現 ${c.rz.toFixed(2)}R · 剩 ${Math.round(c.wRem * 100)}%</span></div>`;
         body += `<div class="slwhy">${slNote(sym, c)}</div>`;
+        if (c.voided.length) body += `<div class="slwhy">進場後作廢的掛單：${voidedTxt(sym, c)}（MT5 有掛的話要刪掉）</div>`;
       } else if (c.levels.length) {
         body += c.levels.map(l => `<div class="row"><span>掛單 ${px(sym, l.price)}</span><span class="muted">${esc(l.name)}</span></div>`).join("");
         body += `<div class="row"><span>SL ${px(sym, c.sl)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
@@ -243,7 +246,7 @@ function renderActive() {
         <td>${entryCell(sym, c)}</td>
         <td title="${slNote(sym, c)}">${px(sym, c.slNow ?? c.sl)}${c.slTag ? ` <span class="tag mv">${esc(c.slTag)}</span><br><span class="muted">原 ${px(sym, c.sl)}</span>` : ""}</td>
         ${[0,1,2,3].map(i => `<td>${tpCell(sym, c, i)}</td>`).join("")}
-        <td class="muted">${esc([c.poor, c.note].filter(Boolean).join(" · "))}</td></tr>`);
+        <td class="muted">${[esc(c.poor), esc(c.note), c.voided.length ? "進場後作廢：" + voidedTxt(sym, c) : ""].filter(Boolean).join(" · ")}</td></tr>`);
   $("active").innerHTML = rows.join("") || '<tr><td colspan="14" class="muted">目前沒有</td></tr>';
 }
 
