@@ -48,6 +48,7 @@ DATA = Path(os.environ.setdefault("CRT_DATA_DIR", str(Path.home() / "crt-dash-da
 
 import mt5src  # noqa: E402
 import notify  # noqa: E402
+import report  # noqa: E402
 import scan  # noqa: E402
 from crt_engine import K_NAME, TF_MS  # noqa: E402
 
@@ -126,22 +127,78 @@ def load_cfg() -> dict:
         if k in s:
             cfg[k] = s[k]
     cfg["alerts"] = s.get("alerts", True)
+    # 日報（跟 8010 一樣：每天 06:00，週日 / 週一早上不發，週二那份會涵蓋到週一）
+    cfg["report"] = dict({"enabled": True, "time": "06:00", "skip_weekend": True}, **cfg.get("report", {}), **s.get("report", {}))
     if os.environ.get("SYMBOLS"):
         cfg["symbols"] = os.environ["SYMBOLS"].split(",")
     return cfg
 
 
-def set_webhook(url: str) -> None:
+def set_webhook(url: str, key: str = "DISCORD_WEBHOOK_URL") -> None:
     """寫進 .env（gitignore）並馬上生效。"""
     env = ROOT / ".env"
     lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
-    lines = [ln for ln in lines if not ln.strip().startswith("DISCORD_WEBHOOK_URL=")] + [f"DISCORD_WEBHOOK_URL={url}"]
+    lines = [ln for ln in lines if not ln.strip().startswith(f"{key}=")] + [f"{key}={url}"]
     env.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.environ["DISCORD_WEBHOOK_URL"] = url
+    os.environ[key] = url
 
 
-def hook_set() -> bool:
-    return bool(os.environ.get("DISCORD_WEBHOOK_URL", "").strip())
+def hook_set(key: str = "DISCORD_WEBHOOK_URL") -> bool:
+    return bool(os.environ.get(key, "").strip())
+
+
+# ───────────── 日報 ─────────────
+ENGINES: dict = {}                  # 最近一次掃描每個商品的 Engine（日報用）
+REPORT_STATE = DATA / "report_state.json"
+
+
+def daily(cfg: dict, back: int = 0, until_now: bool = False) -> dict:
+    tz = ZoneInfo(cfg.get("display_tz", "Asia/Taipei"))
+    now = int(time.time() * 1000)
+    start = report.day_start(now, tz, cfg["report"]["time"], back)
+    end = now if until_now else start + 86_400_000
+    with LOCK:
+        engines = dict(ENGINES)
+    rep = report.summarize(engines, start, end, TF_MS[cfg.get("ltf", "5m")])
+    rep["day"], rep["window"] = report.label(rep, tz)
+    return rep
+
+
+def send_report(cfg: dict, start: int, end: int, partial: bool = False) -> bool:
+    tz = ZoneInfo(cfg.get("display_tz", "Asia/Taipei"))
+    with LOCK:
+        engines = dict(ENGINES)
+    rep = report.summarize(engines, start, end, TF_MS[cfg.get("ltf", "5m")])
+    return notify.send_embed(report.embed(rep, tz, partial), "DISCORD_WEBHOOK_URL_REPORT")
+
+
+def maybe_report(cfg: dict) -> None:
+    """到了日報時間、而且這次還沒發：把上次日報到現在（最多 4 天）整理成一則。"""
+    rc = cfg["report"]
+    if not rc.get("enabled", True) or not ENGINES:
+        return
+    tz = ZoneInfo(cfg.get("display_tz", "Asia/Taipei"))
+    now = int(time.time() * 1000)
+    due = report.day_start(now, tz, rc.get("time", "06:00"))          # 今天的日報時間（已經過了）
+    if SNAP.get("lastScan", 0) < due + 5_000:                          # 等日報時間之後的第一次掃描
+        return
+    try:
+        last = json.loads(REPORT_STATE.read_text(encoding="utf-8")).get("last_end", 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        last = 0
+    if last >= due:
+        return
+    if rc.get("skip_weekend", True) and datetime.fromtimestamp(due / 1000, tz).weekday() in (6, 0):   # 週日、週一早上
+        return
+    start = max(last or due - 86_400_000, due - 4 * 86_400_000)
+    try:
+        ok = send_report(cfg, start, due)
+    except Exception as e:
+        log.warning("日報送不出去：%s", e)
+        return
+    if ok:
+        REPORT_STATE.write_text(json.dumps({"last_end": due}), encoding="utf-8")
+        log.info("已發日報（%s）", report.label({"start": start, "end": due}, tz)[1])
 
 
 _last_alert: dict[str, float] = {}
@@ -243,6 +300,11 @@ def do_scan(cfg: dict) -> None:
         err = f"{type(e).__name__}: {e}"
         log.error("掃描失敗：%s\n%s", e, traceback.format_exc())
     syms = {}
+    engines = {s: r for s, r in results.items() if not isinstance(r, Exception)}
+    with LOCK:
+        if err is None:
+            ENGINES.clear()
+        ENGINES.update(engines)
     for sym, r in results.items():
         if isinstance(r, Exception):
             old = SNAP["symbols"].get(sym) or {}
@@ -318,6 +380,7 @@ def loop() -> None:
             do_scan(cfg)
             if SNAP.get("scanError"):
                 alert("scan", "CRT 儀表板掃描失敗", SNAP["scanError"] + "\n（這段時間不會有訊號通知）", cfg)
+            maybe_report(cfg)
             now = time.time() * 1000
             nxt = (now // ltf_ms + 1) * ltf_ms + 8_000        # 下一根 K 收盤後 8 秒
             SNAP["nextScan"] = int(nxt)
@@ -371,7 +434,15 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/settings":
             cfg = load_cfg()
             self._json({"symbols": cfg.get("symbols", []), "notify": cfg.get("notify", []), "alerts": cfg.get("alerts", True),
-                        "discord": hook_set()})
+                        "discord": hook_set(), "discord_report": hook_set("DISCORD_WEBHOOK_URL_REPORT"),
+                        "report": cfg["report"]})
+        elif u.path == "/api/daily":
+            try:
+                back = max(0, min(13, int(parse_qs(u.query).get("back", ["0"])[0])))
+            except ValueError:
+                back = 0
+            cfg = load_cfg()
+            self._json(daily(cfg, back, until_now=back == 0))
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -407,15 +478,35 @@ class Handler(BaseHTTPRequestHandler):
                 upd["notify"] = [k for k in KINDS if k in body["notify"]]
             if "alerts" in body:
                 upd["alerts"] = bool(body["alerts"])
-            hook = str(body.get("webhook", "")).strip()
-            if hook:
-                if not hook.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/",
-                                        "https://ptb.discord.com/api/webhooks/", "https://canary.discord.com/api/webhooks/")):
-                    return self._json({"ok": False, "error": "Webhook 網址要是 https://discord.com/api/webhooks/… 開頭"}, 400)
-                set_webhook(hook)
+            if isinstance(body.get("report"), dict):
+                rb = body["report"]
+                tm = str(rb.get("time", "06:00")).strip()
+                try:
+                    hh, mm = (int(x) for x in tm.split(":"))
+                    assert 0 <= hh < 24 and 0 <= mm < 60
+                except Exception:
+                    return self._json({"ok": False, "error": "日報時間要像 06:00"}, 400)
+                upd["report"] = {"enabled": bool(rb.get("enabled", True)), "time": f"{hh:02d}:{mm:02d}",
+                                 "skip_weekend": bool(rb.get("skip_weekend", True))}
+            for field, key in (("webhook", "DISCORD_WEBHOOK_URL"), ("webhook_report", "DISCORD_WEBHOOK_URL_REPORT")):
+                hook = str(body.get(field, "")).strip()
+                if hook:
+                    if not hook.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/",
+                                            "https://ptb.discord.com/api/webhooks/", "https://canary.discord.com/api/webhooks/")):
+                        return self._json({"ok": False, "error": "Webhook 網址要是 https://discord.com/api/webhooks/… 開頭"}, 400)
+                    set_webhook(hook, key)
             if upd:
                 save_settings(upd)
             self._json({"ok": True, "discord": hook_set()})
+        elif path == "/api/report/today":
+            cfg = load_cfg()
+            tz = ZoneInfo(cfg.get("display_tz", "Asia/Taipei"))
+            now = int(time.time() * 1000)
+            try:
+                ok = send_report(cfg, report.day_start(now, tz, cfg["report"]["time"]), now, partial=True)
+                self._json({"ok": ok, "error": "" if ok else "還沒設定 Webhook"})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
         elif path == "/api/test/discord":
             if not hook_set():
                 return self._json({"ok": False, "error": "還沒設定 Webhook"})

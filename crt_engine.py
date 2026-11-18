@@ -199,6 +199,7 @@ class CRT:
     skipTxt: str = ""
     done: bool = False
     result: str = ""
+    xT: int | None = None       # 結束那根 LTF K 的開盤時間（日報用）
 
     @property
     def key(self) -> str:
@@ -358,7 +359,8 @@ class Engine:
         self.kCnt = [0] * 9
         self.day = [0.0, 0.0, 0.0]
         self.crts: list[CRT] = []
-        self.sessions = [Sess("AS.", p.s_as, True), Sess("TKO.", p.s_tko, True), Sess("LD.", p.s_ld, True),
+        self.trades: list[CRT] = []     # 有進場的 CRT（結束後 crts 會刪掉，這裡留著給日報）
+        self.sessions =[Sess("AS.", p.s_as, True), Sess("TKO.", p.s_tko, True), Sess("LD.", p.s_ld, True),
                          Sess("NY.8", p.s_ny8, True), Sess("NY.9", p.s_ny9, True),
                          Sess("亞洲盤", True, False), Sess("倫敦盤", True, False), Sess("開盤前", p.use_pre, False)]
         self.zones: list[Zone] = []
@@ -661,6 +663,7 @@ class Engine:
         c.slNow, c.wRem, c.rz = c.sl, 1.0, 0.0
         if c.r1 is not None and c.r1 <= 0:  # TP1 已過進場價 → 略過，部位併到 TP2，保本改在 TP2
             c.tp1 = c.t1Skip = True
+        self.trades.append(c)
         self.day[0] += 1
         self.kCnt[kind] += 1
         self.emit("entry", c, self.entryText(c), sig=kind, price=px, sl=c.sl, tp1=c.t1Px,
@@ -822,6 +825,7 @@ class Engine:
 
     def finish(self, c: CRT, reason: str | None = None):
         c.done = True
+        c.xT = self.b().t
         if c.entered:
             self.account(c)
         elif c.counted and c.skipTxt == "":

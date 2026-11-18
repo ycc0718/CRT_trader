@@ -23,6 +23,22 @@ def edit(msg_id: str, title: str, desc: str, color: int) -> None:
                        json={"embeds": [{"title": title[:256], "description": desc[:4000], "color": color}]})
 
 
+def send_embed(emb: dict, hook_env: str = "DISCORD_WEBHOOK_URL") -> bool:
+    """送一整個 embed（日報用）。hook_env 沒設定就退回 DISCORD_WEBHOOK_URL；都沒有就印在畫面上。"""
+    hook = (os.environ.get(hook_env, "") or os.environ.get("DISCORD_WEBHOOK_URL", "")).strip()
+    if not hook:
+        print(f"[未設定通知] {emb.get('title')}\n{emb.get('description')}")
+        return False
+    for _ in range(3):
+        r = requests.post(hook, json={"embeds": [emb]}, timeout=10)
+        if r.status_code == 429:
+            time.sleep(float(r.headers.get("Retry-After", "1")) + 0.2)
+            continue
+        r.raise_for_status()
+        return True
+    return False
+
+
 def send(kind: str, direction: int, text: str, when: str) -> dict | None:
     """送出；Discord 會回傳這則訊息的 id（之後拿來改）。"""
     hook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()

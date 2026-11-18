@@ -115,6 +115,16 @@
     <tbody id="active"></tbody></table>
   </div>
 
+  <div class="section">
+    <h2>每日統計 <select id="dDay"></select> <span class="note" id="dWin"></span></h2>
+    <table><thead><tr><th>商品</th><th>進場</th><th>TP1</th><th>TP2</th><th>TP3</th><th>TP4</th><th>停損</th><th>保本</th><th>持倉中</th><th>累積 R</th><th>持倉浮動</th></tr></thead>
+    <tbody id="dRows"></tbody></table>
+    <details style="margin-top:8px" open><summary>每筆明細</summary>
+      <table><thead><tr><th>進場時間</th><th>商品</th><th>方向</th><th>進場訊號</th><th>價格</th><th>結果</th><th>R</th></tr></thead><tbody id="dTrades"></tbody></table>
+    </details>
+    <div class="note" style="margin-top:6px">依進場時間歸日（台灣 06:00 換日 = 紐約收盤）· 1R = 原始停損的距離 · 照設定分批出場（預設 TP1–4 各 25%）+ 到 TP1 保本 · 模擬訊號，不是實際成交</div>
+  </div>
+
   <div class="section" id="posBox" style="display:none">
     <h2>MT5 帳戶持倉 / 掛單（手動單）</h2>
     <table><thead><tr><th>商品</th><th>方向</th><th>手數</th><th>開倉</th><th>SL</th><th>TP</th><th>現價</th><th>損益</th></tr></thead>
@@ -154,6 +164,12 @@
     <fieldset><legend>Discord</legend>
       <label>Webhook <span id="hookSt" class="muted"></span><input name="hook" type="password" placeholder="https://discord.com/api/webhooks/…（留空 = 不改）" autocomplete="off"></label>
       <div class="row" style="justify-content:flex-start;gap:8px;align-items:center"><button type="button" id="tMt5">測試 MT5</button><button type="button" id="tDis">測試頻道</button><span id="testMsg" class="note"></span></div>
+    </fieldset>
+    <fieldset><legend>日報（跟 8010 一樣）</legend>
+      <label>每天幾點發（週日、週一早上不發，週二那份涵蓋到週一）<span><input type="checkbox" name="r_enabled"> <input name="r_time" placeholder="06:00" style="width:70px"></span></label>
+      <label>週末不發<input type="checkbox" name="r_skip"></label>
+      <label>Webhook：日報（留空 = 發到訊號頻道）<span id="hookRepSt" class="muted"></span><input name="hook_report" type="password" placeholder="https://discord.com/api/webhooks/…（留空 = 不改）" autocomplete="off"></label>
+      <div class="row" style="justify-content:flex-start;gap:8px;align-items:center"><button type="button" id="tRep">立即發送今日日報</button><span id="repMsg" class="note"></span></div>
     </fieldset>
     <div class="row" style="justify-content:flex-end;gap:8px"><button value="cancel">取消</button><button type="button" id="saveSet">儲存</button></div>
   </form>
@@ -404,9 +420,34 @@ async function pollLive() {
   $("pLive").className = "pill" + (stale ? " warn" : "");
 }
 
+// ───────────── 每日統計 ─────────────
+const sgnR = v => (v >= 0 ? "+" : "") + v.toFixed(2);
+function initDays() {
+  const dd = $("dDay"), names = ["今天", "昨天", "前天"];
+  for (let i = 0; i < 7; i++) dd.add(new Option(names[i] || `${i} 天前`, i));
+  dd.onchange = loadDaily;
+}
+let dailyKey = "";
+async function loadDaily() {
+  const back = $("dDay").value;
+  const r = await fetch("/api/daily?back=" + back).then(r => r.json()).catch(() => null);
+  if (!r) return;
+  $("dWin").textContent = `${r.day} · ${r.window}${back == 0 ? "（到目前為止）" : ""}`;
+  const row = (name, x, bold) => `<tr${bold ? ' style="font-weight:600"' : ""}><td>${esc(name)}</td><td>${x.n}</td>${x.tp.map(n => `<td>${n}</td>`).join("")}
+    <td>${x.stop}</td><td>${x.be}</td><td>${x.open}</td><td class="${x.r < 0 ? "bear" : x.r > 0 ? "bull" : ""}">${sgnR(x.r)}R</td>
+    <td class="muted">${x.open ? sgnR(x.float) + "R" : "—"}</td></tr>`;
+  $("dRows").innerHTML = r.rows.map(x => row(x.sym, x)).join("") + row("合計", r.total, true);
+  const tr = (x, carried) => `<tr><td>${fmtT(x.t)}</td><td>${esc(x.sym)}</td><td>${x.dir < 0 ? '<span class="bear">空</span>' : '<span class="bull">多</span>'}</td>
+    <td>${esc(x.kind)}</td><td>${esc(x.price)}</td><td style="white-space:normal">${carried ? '<span class="muted">（前一天進場）</span> ' : ""}${esc(x.outcome)}</td>
+    <td class="${x.r < 0 ? "bear" : x.r > 0 ? "bull" : ""}">${sgnR(x.r)}R${x.done === false ? ` <span class="muted">浮動 ${sgnR(x.float)}</span>` : ""}</td></tr>`;
+  $("dTrades").innerHTML = r.trades.map(x => tr(x)).join("") + r.carried.map(x => tr(x, true)).join("")
+    || '<tr><td colspan="7" class="muted">這一天沒有進場</td></tr>';
+}
+
 async function poll() {
   try {
     S = await fetch("/api/state").then(r => r.json());
+    if (S.lastScan && S.lastScan + "" !== dailyKey) { dailyKey = S.lastScan + ""; loadDaily(); }
     renderHeader(); renderCards(); renderActive(); renderPos(); renderEvents(); renderStats(); tick();
     await loadChart(false);
   } catch (e) {
@@ -474,14 +515,27 @@ $("btnSet").onclick = async () => {
   await loadSettings();
   const f = $("setForm");
   KINDS.forEach(k => f[k].checked = MY.notify.includes(k));
-  f.alerts.checked = MY.alerts; f.hook.value = "";
+  f.alerts.checked = MY.alerts; f.hook.value = ""; f.hook_report.value = "";
+  f.r_enabled.checked = MY.report.enabled; f.r_time.value = MY.report.time; f.r_skip.checked = MY.report.skip_weekend;
   $("hookSt").textContent = MY.discord ? "已設定" : "未設定";
-  $("testMsg").textContent = "";
+  $("hookRepSt").textContent = MY.discord_report ? "已設定" : "未設定（發到訊號頻道）";
+  $("testMsg").textContent = ""; $("repMsg").textContent = "";
   $("dlg").showModal();
 };
+$("tRep").onclick = async () => {
+  $("repMsg").textContent = "發送中…";
+  if ($("setForm").hook_report.value.trim()) {
+    const s = await post("/api/settings", {webhook_report: $("setForm").hook_report.value.trim()});
+    if (!s.ok) { $("repMsg").textContent = s.error; return; }
+  }
+  const r = await post("/api/report/today");
+  $("repMsg").textContent = r.ok ? "✅ 已發送（今天到目前為止）" : "❌ " + r.error;
+};
 $("saveSet").onclick = async () => {
-  const f = $("setForm"), body = {notify: KINDS.filter(k => f[k].checked), alerts: f.alerts.checked};
+  const f = $("setForm"), body = {notify: KINDS.filter(k => f[k].checked), alerts: f.alerts.checked,
+    report: {enabled: f.r_enabled.checked, time: f.r_time.value.trim() || "06:00", skip_weekend: f.r_skip.checked}};
   if (f.hook.value.trim()) body.webhook = f.hook.value.trim();
+  if (f.hook_report.value.trim()) body.webhook_report = f.hook_report.value.trim();
   const r = await post("/api/settings", body);
   if (!r.ok) { $("testMsg").textContent = r.error; return; }
   $("dlg").close(); loadSettings(); poll();
@@ -505,6 +559,7 @@ $("tMt5").onclick = async () => {
 $("fSym").onchange = renderEvents; $("fKind").onchange = renderEvents;
 $("btnScan").onclick = async () => { $("btnScan").disabled = true; await post("/api/scan"); setTimeout(() => { $("btnScan").disabled = false; poll(); }, 4000); };
 initChart();
+initDays();
 loadSettings();
 poll().then(() => loadChart(true));
 setInterval(poll, 5000);
