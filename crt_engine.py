@@ -667,6 +667,24 @@ class Engine:
                   tp2=c.rL if c.dir < 0 else c.rH, tp3=c.tp3, tp4=c.tp4, r=[c.r1, c.r2, c.r3, c.r4],
                   kl=c.klName, aggressive=c.preConf)
 
+    def slTag(self, c: CRT) -> str:
+        """進場後停損移到哪裡了（沒移動 = ""）。"""
+        if not c.entered or c.slNow is None or c.slNow == c.sl:
+            return ""
+        return "保本" if c.slNow == c.ePx else "TP1" if c.slNow == c.t1Px else "移動"
+
+    def slWhy(self, c: CRT) -> str:
+        """原始停損是怎麼來的（給儀表板說明用）。"""
+        bear = c.dir < 0
+        buf = self.p.sl_buf * self.p.tick
+        swept = None if c.ext is None else (c.ext + buf if bear else c.ext - buf)
+        if c.entered and c.eKind == 4 and swept is not None and c.sl != swept:
+            return "LTF OB 外（④ 的停損放在 OB 外，比掃點近）"
+        s = f"C2 掃到的最{'高' if bear else '低'}點" + (f"外 {self.p.sl_buf} tick" if self.p.sl_buf else "")
+        if c.model == 3:
+            s += "（M3：掃了好幾根，停損跟著移到最新的掃點）"
+        return s
+
     def mgmtTxt(self) -> str:
         w = [round(x * 100) for x in self.w]
         s = f"分批 TP1 {w[0]}% / TP2 {w[1]}% / TP3 {w[2]}% / TP4 {w[3]}%"
@@ -1311,7 +1329,8 @@ class Engine:
                                    + ("" if cr.done else f" · 還剩 {round(cr.wRem * 100)}%") + f" · {self.kName(cr.eKind)}")
                             self.emit("exit", cr, txt, ev=ev, rz=cr.rz, done=cr.done,
                                       hits=[cr.tp1 and not cr.t1Skip, cr.tp2, cr.tp3Hit, cr.tp4Hit], stopped=cr.stopped,
-                                      be=cr.stopped and cr.slNow == cr.ePx)
+                                      be=cr.stopped and cr.slNow == cr.ePx, sl_now=cr.slNow, sl_tag=self.slTag(cr),
+                                      sl_now_txt=self.px(cr.slNow))
                 else:
                     canEnter = cr.state == 1 or (p.aggressive and (c < cr.rH if bear else c > cr.rL))
                     filled = False

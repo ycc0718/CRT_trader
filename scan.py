@@ -120,6 +120,9 @@ def mark_card(m: dict, d: dict) -> None:
     for k, hit in enumerate(d.get("hits", [])):
         tag = f"🎯 TP{k + 1}:"
         lines = [ln + " ✅" if hit and ln.startswith(tag) and not ln.endswith("✅") else ln for ln in lines]
+    if d.get("sl_tag"):  # 停損移動了：原本的 SL 行後面寫現在在哪（例如「→ 保本 7325.57」）
+        lines = [f"{ln.split(' → ')[0]} → {d['sl_tag']} {d.get('sl_now_txt', '')}" if ln.startswith("🚫 SL:") else ln
+                 for ln in lines]
     if d.get("done"):
         res = ("⚪ 保本出場" if d.get("be") else "❌ 停損出場") if d.get("stopped") else "🏁 全部出場"
         lines = [ln for ln in lines if not ln.startswith(("❌ 停損出場", "⚪ 保本出場", "🏁 全部出場"))]

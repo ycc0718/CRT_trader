@@ -35,6 +35,9 @@
   .st.hold { color:#ffd60a; } .st.lim { color:#7fb0ff; }
   .tps { font-size:12px; margin-top:4px; border-top:1px dashed var(--line); padding-top:4px; }
   .hit { color:var(--tp); }
+  .px.up { color:var(--bullT); } .px.dn { color:var(--bearT); }
+  .tag.mv { background:#ffd60a22; color:#ffd60a; font-weight:500; }
+  .slwhy { font-size:12px; color:var(--muted); margin:1px 0 2px; }
   .section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; overflow-x:auto; }
   .section h2 { font-size:14px; margin:0 0 8px; font-weight:600; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   #chart { height:max(460px, 62vh); }
@@ -77,6 +80,7 @@
   <span class="pill" id="pMt5"><span class="dot" id="dMt5"></span>MT5</span>
   <span class="pill" id="pAcct">帳戶 —</span>
   <span class="pill" id="pTf">—</span>
+  <span class="pill" id="pLive" title="報價、浮動 R、帳戶、圖上最後一根 K 每秒更新">即時 —</span>
   <span class="pill" id="pScan">上次掃描 —</span>
   <span class="pill" id="pNext">—</span>
   <span class="pill" id="pDiscord">Discord —</span>
@@ -97,7 +101,7 @@
   <div class="grid" id="cards"></div>
 
   <div class="section">
-    <h2><span id="chartTitle">—</span><span class="note">5 分 K（已收盤）· 線 = 這個商品還在進行的 CRT · 箭頭 = 進場、圓點 = 出場 / 確認</span></h2>
+    <h2><span id="chartTitle">—</span><span class="note">5 分 K · 最後一根是即時（還沒收盤，訊號只看收盤的 K）· 線 = 這個商品還在進行的 CRT · 箭頭 = 進場、圓點 = 出場 / 確認</span></h2>
     <div class="legend">
       <span><i style="background:var(--rng)"></i>CRH / CRL</span><span><i style="background:var(--en)"></i>進場 / 掛單</span>
       <span><i style="background:var(--sl)"></i>SL</span><span><i style="background:var(--tp)"></i>TP1–TP4</span><span><i style="background:var(--kl)"></i>KL</span>
@@ -185,6 +189,13 @@ function tpCell(sym, c, i) {
   return (c.hits[i] ? '<span class="hit">✓ ' : "<span>") + px(sym, v) + "</span>" + rr;
 }
 
+// 停損從哪來：原始 SL（C2 掃點 / LTF OB）＋ 進場後移到哪
+function slNote(sym, c) {
+  const moved = c.slTag === "保本" ? "打到 TP1 後移到進場價（保本）" : c.slTag === "TP1" ? "打到 TP2 後移到 TP1" : c.slTag ? "已移動" : "";
+  return esc((c.slTag ? `原始 SL ${px(sym, c.sl)} = ` : "SL = ") + (c.slWhy || "—") + (moved ? "；" + moved : ""));
+}
+let tickDir = {}, chartLast = 0, liveBar = {}, liveT = 0;
+
 function renderCards() {
   const box = $("cards"), syms = Object.keys(S.symbols);
   if (!sel || !S.symbols[sel]) sel = syms[0] || "";
@@ -199,10 +210,12 @@ function renderCards() {
         const risk = c.dir < 0 ? c.sl - c.entry.price : c.entry.price - c.sl;
         if (q && risk > 0) { const now = c.dir < 0 ? q.ask : q.bid; mtm = ` · 浮動 ${(((c.dir < 0 ? c.entry.price - now : now - c.entry.price)) / risk).toFixed(2)}R`; }
         body += `<div class="row"><span>進場 ${px(sym, c.entry.price)}</span><span class="muted">${esc(c.entry.name)}${mtm}</span></div>`;
-        body += `<div class="row"><span>SL ${px(sym, c.slNow ?? c.sl)}</span><span class="muted">已實現 ${c.rz.toFixed(2)}R · 剩 ${Math.round(c.wRem * 100)}%</span></div>`;
+        body += `<div class="row"><span>SL ${px(sym, c.slNow ?? c.sl)}${c.slTag ? ` <span class="tag mv">${esc(c.slTag)}</span>` : ""}</span><span class="muted">已實現 ${c.rz.toFixed(2)}R · 剩 ${Math.round(c.wRem * 100)}%</span></div>`;
+        body += `<div class="slwhy">${slNote(sym, c)}</div>`;
       } else if (c.levels.length) {
         body += c.levels.map(l => `<div class="row"><span>掛單 ${px(sym, l.price)}</span><span class="muted">${esc(l.name)}</span></div>`).join("");
         body += `<div class="row"><span>SL ${px(sym, c.sl)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
+        body += `<div class="slwhy">${slNote(sym, c)}</div>`;
       } else {
         body += `<div class="row"><span class="muted">區間 ${px(sym, c.rL)} – ${px(sym, c.rH)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
       }
@@ -215,7 +228,8 @@ function renderCards() {
     }
     const last = (v.events || []).slice(-1)[0];
     if (last) body += `<div class="note" style="margin-top:4px">最近：${fmtT(last.t)} ${esc(last.title.replace(/^\S+\s/, ""))}</div>`;
-    return `<div class="card${sym === sel ? " sel" : ""}" data-sym="${esc(sym)}"><div class="top"><span class="sym">${esc(sym)}</span><span class="px">${q ? px(sym, q.bid) : ""}</span></div>${body}</div>`;
+    const dirCls = tickDir[sym] > 0 ? " up" : tickDir[sym] < 0 ? " dn" : "";
+    return `<div class="card${sym === sel ? " sel" : ""}" data-sym="${esc(sym)}"><div class="top"><span class="sym">${esc(sym)}</span><span class="px${dirCls}">${q ? px(sym, q.bid) : ""}</span></div>${body}</div>`;
   }).join("");
   box.querySelectorAll(".card").forEach(el => el.onclick = () => { sel = el.dataset.sym; localStorage.setItem("crtSel", sel); renderCards(); loadChart(true); });
 }
@@ -226,7 +240,9 @@ function renderActive() {
     for (const c of v.crts || [])
       rows.push(`<tr><td>${esc(sym)}</td><td>${dirTag(c.dir)}</td><td class="${stCls(c.status)}">${esc(c.status)}</td><td>${fmtT(c.t1)}</td>
         <td>${px(sym, c.rH)} / ${px(sym, c.rL)}</td><td>${esc(c.kl || "—")}</td><td>M${c.model}${c.sess ? " · " + esc(c.sess) : ""}${c.tbs ? " · TBS" : ""}</td>
-        <td>${entryCell(sym, c)}</td><td>${px(sym, c.slNow ?? c.sl)}</td>${[0,1,2,3].map(i => `<td>${tpCell(sym, c, i)}</td>`).join("")}
+        <td>${entryCell(sym, c)}</td>
+        <td title="${slNote(sym, c)}">${px(sym, c.slNow ?? c.sl)}${c.slTag ? ` <span class="tag mv">${esc(c.slTag)}</span><br><span class="muted">原 ${px(sym, c.sl)}</span>` : ""}</td>
+        ${[0,1,2,3].map(i => `<td>${tpCell(sym, c, i)}</td>`).join("")}
         <td class="muted">${esc([c.poor, c.note].filter(Boolean).join(" · "))}</td></tr>`);
   $("active").innerHTML = rows.join("") || '<tr><td colspan="14" class="muted">目前沒有</td></tr>';
 }
@@ -321,8 +337,10 @@ async function loadChart(force) {
   chartKey = key;
   const r = await fetch("/api/chart?sym=" + encodeURIComponent(sel)).then(r => r.json()).catch(() => null);
   if (!r) return;
-  $("chartTitle").textContent = sel;
   series.setData(r.bars);
+  chartLast = r.bars.length ? r.bars[r.bars.length - 1].time : 0;
+  const lb = liveBar[sel];
+  if (lb && lb.time >= chartLast) series.update(lb);       // 補上還沒收盤的那根
   const KS = {1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤", 6: "⑥", 7: "⑦", 8: "⑧"};
   const mk = [];
   for (const e of r.events) {
@@ -343,13 +361,44 @@ function drawLines() {
   const add = (price, color, title, style = 0, width = 1) => price != null && lines.push(series.createPriceLine({price, color, title, lineStyle: style, lineWidth: width, axisLabelVisible: true}));
   for (const c of (v.crts || []).filter(c => c.confirmed || c.entered || c.levels.length).slice(0, 2)) {
     const d = c.dir < 0 ? "空" : "多";
-    add(c.rH, "#e8a21b", "CRH", 2); add(c.rL, "#e8a21b", "CRL", 2);
+    add(c.rH, "#e8a21b", `${d} CRH`, 2); add(c.rL, "#e8a21b", `${d} CRL`, 2);
     if (c.entry) add(c.entry.price, "#4c8dff", `${d} 進場`, 0, 2);
     for (const l of c.levels) add(l.price, "#4c8dff", `${d} 掛 ${l.name.slice(0, 1)}`, 1);
-    add(c.slNow ?? c.sl, "#ff3b5c", "SL", 0, 2);
-    c.tps.forEach((t, i) => !(i === 0 && c.t1Skip) && add(t, "#2fd0b2", `TP${i + 1}${c.hits[i] ? " ✓" : ""}`, 1));
+    add(c.slNow ?? c.sl, "#ff3b5c", `${d} SL${c.slTag ? " " + c.slTag : ""}`, 0, 2);
+    if (c.slTag) add(c.sl, "rgba(255,59,92,0.45)", `${d} 原SL`, 3);
+    c.tps.forEach((t, i) => !(i === 0 && c.t1Skip) && add(t, "#2fd0b2", `${d} TP${i + 1}${c.hits[i] ? " ✓" : ""}`, 1));
   }
-  $("chartTitle").textContent = sel + (v.quote ? `  ${px(sel, v.quote.bid)}` : "");
+  chartTitle();
+}
+function chartTitle() {
+  const v = S && S.symbols[sel];
+  $("chartTitle").textContent = sel + (v && v.quote ? `  ${px(sel, v.quote.bid)}` : "");
+}
+
+// ───────────── 即時（每秒）：報價、浮動 R、帳戶、圖上最後一根 ─────────────
+async function pollLive() {
+  if (!S) return;
+  let r;
+  try { r = await fetch("/api/live").then(r => r.json()); }
+  catch (e) { $("pLive").textContent = "即時 斷線"; $("pLive").className = "pill bad"; return; }
+  if (!r.t) return;
+  if (r.account) S.account = r.account;
+  S.mt5Error = r.mt5Error;
+  for (const [sym, q] of Object.entries(r.symbols || {})) {
+    if (!S.symbols[sym]) continue;
+    const prev = S.symbols[sym].quote;
+    if (prev && prev.bid != null && q.bid != null && q.bid !== prev.bid) tickDir[sym] = q.bid > prev.bid ? 1 : -1;
+    S.symbols[sym].quote = {bid: q.bid, ask: q.ask};
+    if (q.bar) {
+      liveBar[sym] = q.bar;
+      if (sym === sel && chartLast && q.bar.time >= chartLast) series.update(q.bar);
+    }
+  }
+  renderHeader(); renderCards(); renderPos(); chartTitle();
+  const tz = (S.config && S.config.tz) || "Asia/Taipei";
+  const stale = Date.now() - r.t > 5000;
+  $("pLive").textContent = "即時 " + new Intl.DateTimeFormat("zh-TW", {timeZone: tz, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false}).format(r.t);
+  $("pLive").className = "pill" + (stale ? " warn" : "");
 }
 
 async function poll() {
@@ -456,7 +505,7 @@ initChart();
 loadSettings();
 poll().then(() => loadChart(true));
 setInterval(poll, 5000);
-setInterval(tick, 1000);
+setInterval(() => { tick(); pollLive(); }, 1000);
 </script>
 </body>
 </html>

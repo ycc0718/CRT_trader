@@ -183,6 +183,7 @@ def crt_view(eng, c) -> dict:
     return {
         "key": c.key, "dir": c.dir, "model": c.model, "status": status, "confirmed": c.confirmed,
         "entered": c.entered, "rH": c.rH, "rL": c.rL, "mid": c.mid, "sl": _num(c.sl), "slNow": _num(c.slNow),
+        "slTag": eng.slTag(c), "slWhy": eng.slWhy(c) if c.sl is not None else "",
         "cisd": _num(c.cisdLvl), "ext": _num(c.ext), "kl": c.klName, "sess": c.sess, "tbs": c.tbs, "poor": c.poor,
         "note": c.note, "t1": c.t1, "t2": c.t2, "levels": lv,
         "entry": {"kind": c.eKind, "name": eng.kName(c.eKind), "price": c.ePx, "t": c.eT} if c.entered else None,
@@ -202,6 +203,11 @@ def stats_view(eng) -> dict:
             "kinds": {K_NAME[k]: eng.kCnt[k] for k in range(1, 9) if eng.kCnt[k]}}
 
 
+def tz_shift(t_ms: int, tz: ZoneInfo) -> int:
+    """圖表時間：lightweight-charts 只認 UTC 秒，先加上顯示時區的位移，軸上才會是台灣時間。"""
+    return int(t_ms / 1000 + tz.utcoffset(datetime.fromtimestamp(t_ms / 1000, tz=timezone.utc)).total_seconds())
+
+
 def build_symbol(sym: str, eng, cfg: dict) -> dict:
     ltf_ms = TF_MS[cfg.get("ltf", "5m")]
     bars = eng.ltf_bars
@@ -213,7 +219,7 @@ def build_symbol(sym: str, eng, cfg: dict) -> dict:
     order = {"持倉中": 0, "掛單中": 1}
     active.sort(key=lambda v: (order.get(v["status"], 2), -v["t2"]))
     n = int(cfg.get("chart_bars", 400))
-    shift = lambda t: int(t / 1000 + tz.utcoffset(datetime.fromtimestamp(t / 1000, tz=timezone.utc)).total_seconds())
+    shift = lambda t: tz_shift(t, tz)
     CHART[sym] = {
         "bars": [{"time": shift(b.t), "open": b.o, "high": b.h, "low": b.l, "close": b.c} for b in bars[-n:]],
         "events": [dict(ev, time=shift(ev["bar"])) for ev in events if bars and ev["bar"] >= bars[-n:][0].t],
@@ -261,23 +267,33 @@ def _publish(syms, err, t0, sent, cfg, p) -> None:
     })
 
 
+LIVE: dict = {"t": 0, "symbols": {}}
+
+
 def refresh_live(cfg: dict) -> None:
-    acct, err, quotes = None, None, {}
+    """每秒：帳戶 / 持倉、各商品報價、還沒收盤的那根 K（只給畫面，訊號只看收盤）。"""
+    acct, err, live = None, None, {}
     try:
         acct = mt5src.account()
     except Exception as e:
         err = str(e)
+    tz = ZoneInfo(cfg.get("display_tz", "Asia/Taipei"))
+    ltf = cfg.get("ltf", "5m")
     for sym in list(SNAP["symbols"]):
         try:
-            quotes[sym] = mt5src.quote(sym)
+            q = mt5src.quote(sym) or {}
+            b = mt5src.candles(sym, ltf, 1, closed_only=False)[-1]
+            q["bar"] = {"time": tz_shift(b.t, tz), "open": b.o, "high": b.h, "low": b.l, "close": b.c}
+            live[sym] = q
         except Exception:
             pass
     with LOCK:
         SNAP["account"] = acct if acct is not None else SNAP.get("account")
         SNAP["mt5Error"] = err
-        for sym, q in quotes.items():
+        for sym, q in live.items():
             if sym in SNAP["symbols"]:
-                SNAP["symbols"][sym]["quote"] = q
+                SNAP["symbols"][sym]["quote"] = {"bid": q.get("bid"), "ask": q.get("ask")}
+        LIVE.update({"t": int(time.time() * 1000), "symbols": live, "account": SNAP["account"], "mt5Error": err})
 
 
 def loop() -> None:
@@ -305,7 +321,7 @@ def loop() -> None:
         refresh_live(cfg)
         if SNAP.get("mt5Error"):
             alert("mt5", "CRT 儀表板連不到 MT5", SNAP["mt5Error"] + "\n請確認 MT5（原逆勢攤平那個）有開、有登入", cfg)
-        WAKE.wait(max(0.5, min(5.0, (nxt - time.time() * 1000) / 1000)))
+        WAKE.wait(max(0.3, min(1.0, (nxt - time.time() * 1000) / 1000)))     # 報價每秒更新
 
 
 # ───────────── HTTP ─────────────
@@ -333,6 +349,10 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/state":
             with LOCK:
                 body = json.dumps(SNAP, ensure_ascii=False, default=str)
+            self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")
+        elif u.path == "/api/live":
+            with LOCK:
+                body = json.dumps(LIVE, ensure_ascii=False, default=str)
             self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")
         elif u.path == "/api/chart":
             sym = parse_qs(u.query).get("sym", [""])[0]
