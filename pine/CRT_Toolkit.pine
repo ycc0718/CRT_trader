@@ -1,0 +1,2270 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  CRT 蠟燭區間理論工具箱（Indicator，不含下單 / 回測邏輯）
+//
+//  C1 定義區間（CRH / CRL）→ C2 在 Key Level 上掃走一側流動性、收盤回到區間內 → C3 往另一端
+//  ・KL（Key Level 關鍵區）：掃蕩要發生的地方，看同級或更高的時間框架（打 1H CRT → 1H / 4H / D）
+//      前高前低（OHP/OLP）、EQH / EQL、PDH / PDL、時段 / Killzone / 開盤前高低點、EQ 50%、
+//      A / V 水平、OB / BB / FVG / IFVG、供需區
+//  ・Model 3：掃蕩可能要好幾根 K 才完成 → 延續同一個 CRT，停損移到新掃點
+//  ・進場：①～⑧ 同時監看，哪個先出現就用哪個，進場時標出是哪一種
+//      ① CISD 收盤 ② 回踩 CISD ③ 回踩 IFVG ④ MSS → 回踩 LTF OB ⑤ QM 左肩 ⑥ 回測 BB ⑦ 斐波那契 ⑧ C2 收盤
+//  ・停損：掃點外；TP1 區間 50%；TP2 對側；TP3 更外側流動性
+//  ・LTF 訊號只在 K 棒收盤確認；CRT 只用已收盤的高時間 K，不重繪
+//
+//  僅供學習與輔助判讀，不構成投資建議。
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CRT 蠟燭區間理論工具箱", shorttitle = "CRT Toolkit", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 300)
+
+const string NY    = "America/New_York"
+const string T_AGG = "激進：C2 還沒收盤就找"
+const string T_CON = "保守：C2 收盤確認後"
+const string G1 = "① CRT 區間（三根 K）"
+const string GE = "② 進場訊號（勾選的都會監看，哪個先出現就用哪個）"
+const string GF = "③ 進場過濾"
+const string GX = "③-2 出場管理（分批 / 保本）"
+const string G2 = "④ Key Level 關鍵區"
+const string G3 = "⑤ 時段區間 / Killzone（紐約時間定義）"
+const string G4 = "⑥ LTF 確認（目前圖表）"
+const string G5 = "⑦ SMT / 順勢"
+const string G6 = "⑧ 畫面"
+const string G7 = "⑨ 面板 / 風險 / 每日規則"
+const string G8 = "⑩ 警報（建立警報時，條件選「任何 alert() 函式呼叫」）"
+
+// ───────────────────────────── Inputs ─────────────────────────────
+crtTF    = input.timeframe("60", "CRT 時間框架", options = ["15", "60", "240", "D"], group = G1, tooltip = "高時間找區間、低時間找進場。建議搭配：15M CRT → 1M；1H CRT → 5M/3M/1M；4H CRT → 15M/5M。")
+useM3    = input.bool(true, "Model 3 多根操縱", group = G1, tooltip = "講義第 6 章：掃蕩可能要好幾根 K 才完成。C2 之後又再掃更高（做空）或收在區間外，只要之後收回 C1 區間，就延續同一個 CRT，停損移到新的掃點。關掉的話，收在區間外就放棄。")
+m3Max    = input.int(3, "　收在區間外最多等幾根收回", minval = 1, maxval = 10, group = G1)
+showM2   = input.bool(true, "標示 Model 2：C2 自己掃完並打到另一端", group = G1)
+c3Bars   = input.int(2, "等進場最多幾根 K（C3 有效根數）", minval = 1, maxval = 10, group = G1, tooltip = "CRT 確認後，幾根 CRT 時間框架的 K 內要出現進場訊號，超過就放棄這個 CRT。進場之後抱多久，看「出場管理」的持倉上限。")
+sessOnly = input.bool(false, "只做時段 CRT（C1 = AS./TKO./LD./NY.8/NY.9）", group = G1, tooltip = "只在 CRT 時間框架 = 1H 時有效。")
+minRng   = input.float(0.5, "區間太小 < ATR ×", minval = 0, step = 0.1, group = G1, inline = "rng")
+maxRng   = input.float(3.0, "太大 > ATR ×", minval = 0, step = 0.1, group = G1, inline = "rng", tooltip = "用 CRT 時間框架 ATR(14) 衡量 C1 區間，只在提示裡標「區間偏小 / 偏大」當提醒。設 0 = 不提醒。")
+hidePoor = input.bool(false, "區間偏小 / 偏大就不做", group = G1, tooltip = "預設關閉：區間大小只提醒、不擋進場。")
+
+entryTim = input.string(T_CON, "進場時機", options = [T_AGG, T_CON], group = GE, tooltip = "講義第 8 章。\n激進：C2 還沒收盤、掃完回到區間，就去 LTF 找進場。點位好，但 C2 可能最後沒收回 → 停損。\n保守：等 C2 收盤確認收回，再在 C3 找位置。結構比較確立，點位可能比較差。")
+eC1      = input.bool(true, "① CISD 收盤直接進", group = GE, tooltip = "講義第 9 章（以做空為例，做多反過來）：推上去掃高點那段連續陽線，第一根的開盤價就是 CISD。LTF 帶缺口收盤跌破 CISD，那根收盤進。")
+eC2      = input.bool(true, "② 回踩 CISD", group = GE, tooltip = "CISD 被帶缺口跌破之後，在 CISD 價位掛單，等價格回踩成交。")
+eIF      = input.bool(true, "③ 回踩 IFVG", group = GE, tooltip = "推上去那段留下的多方 FVG，被收盤跌破變成 IFVG（角色反轉），在 IFVG 下緣掛單。")
+eOB      = input.bool(true, "④ MSS → 回踩 LTF OB（A+）", group = GE, tooltip = "講義第 13 章：LTF 帶缺口 MSS 之後，價格回踩 LTF OB、留影線收回，那根收盤進。")
+eQM      = input.bool(true, "⑤ QM 左肩", group = GE, tooltip = "左肩高點 → 掃更高（頭）→ 跌破前低（MSS）→ 在左肩高點掛單。")
+eBB      = input.bool(true, "⑥ 回測 BB", group = GE, tooltip = "推上去之前那段連續陰線（多方 OB），被收盤跌破變成 BB，在 BB 下緣掛單。")
+eFB      = input.bool(false, "⑦ 斐波那契回撤", group = GE, inline = "fb")
+fibLvl   = input.float(0.618, "", options = [0.5, 0.618, 0.705, 0.786], group = GE, inline = "fb", tooltip = "CISD 被帶缺口跌破後，從掃點拉到之後的最低點，在這個回撤位置掛單（掛單價會跟著最低點移動）。")
+eCL      = input.bool(false, "⑧ C2 收盤價（不等 LTF，只做對照）", group = GE, tooltip = "CRT 一確認就以 C2 收盤價進。講義說沒等 LTF 結構轉變就進是新手錯誤，預設關閉。")
+
+rrTarget = input.string("TP2", "RR 顯示 / 計算目標", options = ["TP1", "TP2", "TP3", "TP4"], group = GF)
+minRR    = input.float(0, "最小 RR（0 = 不擋）", minval = 0, step = 0.1, group = GF, tooltip = "預設 0：RR 只顯示、不擋進場（用分批出場 + 保本管理）。設大於 0 時，某一種進場訊號 RR 不夠就不用它，繼續等別種。")
+needPD   = input.bool(false, "做空只在溢價區、做多只在折價區", group = GF, tooltip = "講義第 4 章：區間 50% 以上是溢價、以下是折價，「溢價找空、折價找多」是理想，不是絕對；CRT 主要還是看 KL 和價格反應。預設關閉，只在滑鼠提示裡標出。")
+tbsOnly  = input.bool(false, "只做 TBS", group = GF, tooltip = "講義：CRT 以 TBS 為主。TBS = 有 K 棒實體收在 CRH / CRL 外再收回；只有影線掃過是 TWS。")
+tsGap    = input.bool(true, "TS 要間隔 1 根以上 K", group = GF, tooltip = "講義第 4、11 章：做出前高（低）的那根 K，跟第一根掃過它的 K 中間至少要隔 1 根；沒隔也算是新手常見錯誤。以目前圖表的 K 判斷。")
+slBuf    = input.int(0, "SL 緩衝（tick）", minval = 0, group = GF, tooltip = "停損放在掃點 / OB 外多少 tick。")
+aplSL    = input.string("LTF OB 外", "④ 的停損", options = ["LTF OB 外", "掃點外"], group = GF, tooltip = "講義第 10 章：SL 放掃點的高低點外，或 LTF OB 外。")
+tp1Cap   = input.float(0, "TP1 太遠時改用固定 R（0 = 不改）", minval = 0, step = 0.5, group = GF, tooltip = "講義第 10 章：TP1 抓 50%，太遠的話可以改用盈虧比。例：設 1 → 到 50% 超過 1R 時，TP1 改成 1R。")
+
+wTP1     = input.int(25, "TP1 平倉 %", minval = 0, maxval = 100, group = GX, inline = "w1")
+wTP2     = input.int(25, "TP2 %", minval = 0, maxval = 100, group = GX, inline = "w1")
+wTP3     = input.int(25, "TP3 %", minval = 0, maxval = 100, group = GX, inline = "w2")
+wTP4     = input.int(25, "TP4 %", minval = 0, maxval = 100, group = GX, inline = "w2", tooltip = "每個目標平掉多少部位（合計不是 100 會自動按比例換算）。TP1 = 區間 50%、TP2 = 對側、TP3 = 對側外最近的流動性、TP4 = 再下一個流動性。")
+beTP1    = input.bool(true, "到 TP1 後停損移到進場價（保本）", group = GX)
+trTP2    = input.bool(false, "到 TP2 後停損移到 TP1", group = GX)
+holdMax  = input.int(0, "持倉最多幾根 CRT K（0 = 不限）", minval = 0, maxval = 200, group = GX, tooltip = "0 = 一直抱到 TP4 或停損（保本）為止。")
+
+klOnly   = input.bool(true, "只做掃到 KL 的 CRT", group = G2, tooltip = "講義第 1 章：CRT 最重要的是 C2 掃過去又收回來，而且掃蕩要發生在 Key Level 上；只看到三根 K 的形狀，不代表一定能進場。")
+klSame   = input.bool(true, "CRT 同級的 OB / BB / FVG / IFVG", group = G2, tooltip = "講義第 5 章：KL 要看同級或更高的時間框架。打 1H CRT，1H / 4H / D 的 KL 都可以；15M 的 OB 不能當 1H CRT 的 KL。")
+klTF     = input.timeframe("240", "較高的 KL 時間框架", group = G2, tooltip = "要比 CRT 時間框架高才會用。")
+klDay    = input.bool(true, "日線 OB / BB / FVG / IFVG", group = G2)
+klTolPct = input.float(10, "KL 容許誤差（% of C1 區間）", minval = 0, maxval = 50, group = G2)
+useEQ    = input.bool(true, "EQ 50%：昨日區間、大 K 的中線", group = G2)
+useAV    = input.bool(true, "A / V 水平：收盤價做出的局部高 / 低點", group = G2)
+useSD    = input.bool(true, "供需區：價格多次密集徘徊的區域", group = G2)
+showKLz  = input.bool(false, "畫出所有 OB / FVG / 供需區", group = G2, tooltip = "關掉也會用來判斷 KL；最新訊號掃到的那個 KL 一律會標出來。")
+maxZone  = input.int(30, "區塊最多保留數", minval = 4, maxval = 60, group = G2)
+showPD   = input.bool(true, "PDH / PDL（昨日高低）", group = G2)
+
+showSess = input.bool(true, "畫出 1H 時段區間", group = G3)
+sAS      = input.bool(true, "AS.", group = G3, inline = "s")
+sTKO     = input.bool(true, "TKO.", group = G3, inline = "s")
+sLD      = input.bool(true, "LD.", group = G3, inline = "s")
+sNY8     = input.bool(true, "NY.8", group = G3, inline = "s")
+sNY9     = input.bool(true, "NY.9", group = G3, inline = "s")
+usePre   = input.bool(true, "紐約開盤前高低點（00:00–09:30）當 KL", group = G3, tooltip = "講義第 5 章：開盤前的高低點，常在開盤後先被獵取。亞洲盤、倫敦盤（Killzone）的高低點也一律當 KL 與 TP3 參考。")
+sessCol  = input.color(#e8a21b, "時段區間顏色", group = G3)
+sessMark = input.bool(false, "時段區間被突破時在圖上標記", group = G3)
+showKZ   = input.bool(false, "Killzone 背景（亞洲 / 倫敦 / 紐約上午 / 紐約下午）", group = G3)
+showOpen = input.bool(false, "紐約 8:30 數據 / 9:30 現貨開盤線", group = G3)
+
+swingLen = input.int(3, "MSS 擺動點長度", minval = 1, maxval = 20, group = G4)
+needGap  = input.bool(true, "MSS / CISD 必須帶缺口（FVG）", group = G4, tooltip = "講義第 9 章：先有 TS，再有帶缺口的 MSS。破結構那段（3 根內）要留下缺口才算。")
+showLTF  = input.bool(true, "最新訊號標出 MSS / OB / IFVG / BB / QM", group = G4)
+showCISD = input.bool(false, "最新訊號標出 C3 期間的 CISD", group = G4)
+
+useSMT   = input.bool(false, "啟用 SMT", group = G5)
+smtSym   = input.symbol("CME_MINI:ES1!", "對照商品", group = G5, tooltip = "例：NQ ↔ ES、XAUUSD ↔ XAGUSD、BTC ↔ ETH")
+smtInv   = input.bool(false, "反向相關（例如 DXY）", group = G5)
+useTrend = input.bool(false, "順勢濾網：只做跟高時間趨勢同方向", group = G5, tooltip = "趨勢 = 高時間框架上一根收盤在 EMA 之上（多）或之下（空）。")
+trendTF  = input.timeframe("D", "　趨勢時間框架", group = G5, inline = "tr")
+trendLen = input.int(20, "EMA", minval = 2, group = G5, inline = "tr")
+
+showHTFc = input.bool(true, "最新訊號標出 C1", group = G6)
+oldMode  = input.string("簡略", "舊訊號", options = ["簡略", "隱藏"], group = G6, tooltip = "最新一筆完整標出；更早的縮成小標記，滑鼠移上去可看細節。")
+showZone = input.bool(true, "進場後畫風險 / 報酬區塊", group = G6)
+tagSize  = input.string("中", "價位標籤字體", options = ["小", "中", "大"], group = G6)
+lnW      = input.int(2, "線寬", minval = 1, maxval = 4, group = G6)
+rngCol   = input.color(#e8a21b, "CRH / CRL / TP3", group = G6, inline = "c1")
+enCol    = input.color(#4c8dff, "進場", group = G6, inline = "c1")
+slCol    = input.color(#ff3b5c, "SL", group = G6, inline = "c2")
+tpCol    = input.color(#2fd0b2, "TP1 / TP2", group = G6, inline = "c2")
+klCol    = input.color(#a77bff, "KL", group = G6, inline = "c3")
+bullCol  = input.color(#17a88f, "多方", group = G6, inline = "c3")
+bearCol  = input.color(#ff5577, "空方", group = G6, inline = "c3")
+
+showTbl  = input.bool(true, "顯示面板", group = G7)
+tblPos   = input.string("右上", "面板位置", options = ["右上", "右下", "左上", "左下"], group = G7)
+tblSize  = input.string("中", "面板字體", options = ["小", "中", "大"], group = G7)
+showStat = input.bool(true, "面板顯示統計", group = G7)
+dispTZ   = input.string("Asia/Taipei", "面板顯示時區", group = G7)
+acct     = input.float(10000, "帳戶資金", minval = 0, group = G7, inline = "r")
+riskPct  = input.float(1.0, "每筆風險 %", minval = 0.01, maxval = 10, step = 0.1, group = G7, inline = "r", tooltip = "講義：每筆只承擔帳戶 1–3% 的風險。")
+maxDaily = input.int(0, "每日最多進場筆數（0 = 不限）", minval = 0, group = G7)
+maxLoss  = input.int(0, "連續停損幾次後當日停止（0 = 不限）", minval = 0, group = G7, tooltip = "講義：連續停損就先休息。以「RR 計算目標」出場的結果判斷輸贏。")
+newsMin  = input.int(0, "紐約 8:30 前後幾分鐘不進場（0 = 不避開）", minval = 0, group = G7, tooltip = "講義：CPI、NFP 等重大數據前後不交易。它們多在紐約 8:30 公布；FOMC 在 14:00，請自行注意。")
+
+alEntry  = input.bool(true, "進場 / 掛單成交（含是哪種訊號、SL / TP / RR）", group = G8)
+alLimit  = input.bool(true, "掛限價單（② ③ ⑤ ⑥ ⑦ 出現時，附掛單價 / SL / TP）", group = G8)
+alExit   = input.bool(true, "持倉中：打到 TP / 移到保本 / 出場", group = G8)
+alCRT    = input.bool(false, "CRT 確認（setup）", group = G8)
+alLive   = input.bool(false, "C2 掃完收回（還沒收盤）", group = G8)
+alSess   = input.bool(true, "時段區間被突破（High / Low Broken）", group = G8)
+
+tagSz = tagSize == "小" ? size.small : tagSize == "大" ? size.large : size.normal
+tblSz = tblSize == "小" ? size.small : tblSize == "大" ? size.large : size.normal
+
+// ───────────────────────────── Types ─────────────────────────────
+type CRT
+    int    id
+    int    dir
+    int    model     = 1
+    int    state     = 0          // 0 = 掃蕩中（K 還沒收）、1 = 已確認收回、2 = 收在區間外等收回
+    bool   confirmed = false
+    bool   multi     = false      // 掃蕩跨好幾根（Model 3）
+    bool   counted   = false
+    float  rH
+    float  rL
+    float  mid
+    float  ext
+    int    extT
+    float  entry
+    int    t1
+    int    t2
+    int    sweepT
+    int    c1Idx
+    int    brIdx
+    bool   tbs       = false
+    float  sl
+    float  cisdLvl
+    int    runT
+    bool   cbHit     = false
+    int    cbN       = 0
+    bool   cbGap     = false
+    int    cbOKIdx
+    float  legX
+    float  ifTop
+    float  ifBot
+    int    ifT
+    float  bbTop
+    float  bbBot
+    bool   bbAct     = false
+    int    bbT
+    float  qm
+    bool   mss       = false
+    int    mssT
+    float  mssLvl
+    int    mssIdx
+    float  obTop
+    float  obBot
+    bool   retest    = false
+    // 掛單候選：② 回踩 CISD、③ IFVG、⑤ QM、⑥ BB、⑦ FIB（ix = 生效那根；-1 = RR 不夠不用）
+    float  lv2
+    int    ix2
+    float  lv3
+    int    ix3
+    float  lv5
+    int    ix5
+    float  lv6
+    int    ix6
+    float  lv7
+    int    ix7
+    string note      = ""         // 某種進場訊號被過濾的原因
+    int    eKind     = 0          // 實際用的進場訊號 1～8
+    float  t1Px
+    float  tp3
+    string tp3Name   = ""
+    float  tp4
+    string tp4Name   = ""
+    float  r1
+    float  r2
+    float  r3
+    float  r4
+    float  slNow                  // 進場後目前的停損（保本 / 移動後）
+    float  wRem      = 1.0        // 還沒平掉的部位比例
+    float  rz        = 0.0        // 已實現 R
+    bool   touchNB   = false      // 碰到 CISD 但沒收破
+    int    age       = 0
+    int    waitCnt   = 0
+    string sess      = ""
+    bool   kl        = false
+    string klName    = ""
+    float  klTop
+    float  klBot
+    int    smt       = -1
+    string poor      = ""
+    bool   cisd      = false
+    bool   entered   = false
+    bool   preConf   = false      // C2 收盤確認前就進場（激進）
+    bool   checked   = false
+    bool   c2ok      = false
+    float  ePx
+    int    eT
+    int    eBar
+    bool   tp1       = false
+    bool   t1Skip    = false
+    bool   tp2       = false
+    bool   tp3Hit    = false
+    bool   tp4Hit    = false
+    bool   stopped   = false
+    bool   oppHit    = false
+    string skipTxt   = ""
+    bool   done      = false
+    bool   detail    = false
+    bool   redraw    = false
+    bool   alLiveOK  = false
+    string result    = ""
+    line   lnH
+    line   lnL
+    line   lnT1
+    line   lnSL
+    line   lnE
+    line   lnT3
+    line   lnT4
+    line   lnMSS
+    line   lnQM
+    line   lnKL
+    box    bxRisk
+    box    bxRwd
+    box    bxOB
+    box    bxIF
+    box    bxBB
+    box    bxKL
+    label  lb
+    label  lbSL
+    label  lbE
+    label  lbT1
+    label  lbT2
+    label  lbT3
+    label  lbT4
+    label  lbC1
+    label  lbKL
+    label  lbCISD
+    label  lbRT
+    label  lbEntry
+
+type Sess
+    string name
+    bool   enabled
+    bool   draw
+    float  hi
+    float  lo
+    int    startT
+    int    endT
+    bool   forming = false
+    bool   ready   = false
+    bool   brokeH  = false
+    bool   brokeL  = false
+    line   lnH
+    line   lnL
+
+type Zone
+    int    dir
+    float  top
+    float  bot
+    string kind
+    string tf
+    bool   inv = false
+    box    bx
+
+// ───────────────────────────── 時間框架 ─────────────────────────────
+f_tfName(string tf) =>
+    int sec = timeframe.in_seconds(tf)
+    sec >= 86400 ? "D" : sec >= 3600 ? str.tostring(math.round(sec / 3600)) + "H" : str.tostring(math.round(sec / 60)) + "M"
+
+chartSec  = timeframe.in_seconds()
+crtSec    = timeframe.in_seconds(crtTF)
+klSec     = timeframe.in_seconds(klTF)
+tfOK      = chartSec < crtSec
+sessOK    = chartSec <= 3600
+tfB_ok    = klSec > crtSec and klSec != 86400
+tfD_ok    = 86400 > crtSec
+crtName   = f_tfName(crtTF)
+klTFName  = f_tfName(klTF)
+trendName = f_tfName(trendTF)
+reco      = crtSec >= 86400 ? "1H / 15M" : crtSec >= 14400 ? "15M / 5M" : crtSec >= 3600 ? "5M / 3M / 1M" : "1M"
+recoOK    = crtSec >= 86400 ? (chartSec >= 900 and chartSec <= 3600) : crtSec >= 14400 ? (chartSec >= 300 and chartSec <= 900) : crtSec >= 3600 ? (chartSec >= 60 and chartSec <= 300) : chartSec <= 60
+rrRule    = minRR > 0 ? rrTarget + " ≥ " + str.tostring(minRR) + "R" : "不過濾 RR"
+timShort  = entryTim == T_AGG ? "激進" : "保守"
+klTFs     = (klSame ? crtName : "") + (tfB_ok ? (klSame ? " / " : "") + klTFName : "") + (klDay and tfD_ok ? (klSame or tfB_ok ? " / " : "") + "D" : "")
+onKinds   = (eC1 ? "①" : "") + (eC2 ? "②" : "") + (eIF ? "③" : "") + (eOB ? "④" : "") + (eQM ? "⑤" : "") + (eBB ? "⑥" : "") + (eFB ? "⑦" : "") + (eCL ? "⑧" : "")
+
+// OB：連續反向 K（第一根開盤價 → 最遠影線），被收盤反向突破時成立；回傳上一根已收盤的結果
+f_obCalc() =>
+    var float dnOp     = na
+    var float dnLo     = na
+    var int   dnT      = na
+    var float upOp     = na
+    var float upHi     = na
+    var int   upT      = na
+    var bool  bullUsed = true
+    var bool  bearUsed = true
+    bool up = close > open
+    bool dn = close < open
+    if dn and not dn[1]
+        dnOp     := open
+        dnLo     := low
+        dnT      := time
+        bullUsed := false
+    else if dn
+        dnLo := math.min(dnLo, low)
+    if up and not up[1]
+        upOp     := open
+        upHi     := high
+        upT      := time
+        bearUsed := false
+    else if up
+        upHi := math.max(upHi, high)
+    float bT  = na
+    float bB  = na
+    int   bTm = na
+    float sT  = na
+    float sB  = na
+    int   sTm = na
+    if not bullUsed and up and close > dnOp
+        bT       := dnOp
+        bB       := dnLo
+        bTm      := dnT
+        bullUsed := true
+    if not bearUsed and dn and close < upOp
+        sT       := upHi
+        sB       := upOp
+        sTm      := upT
+        bearUsed := true
+    [bT[1], bB[1], bTm[1], sT[1], sB[1], sTm[1]]
+
+// ───────────────────────────── 高時間資料（只取已收盤 K，不重繪） ─────────────────────────────
+[kO, kH, kL, kC, kT, hAtr, curT] = request.security(syminfo.tickerid, crtTF, [open[1], high[1], low[1], close[1], time[1], ta.atr(14)[1], time], lookahead = barmerge.lookahead_on)
+smtTicker = useSMT ? smtSym : syminfo.tickerid
+[sH1, sL1, sH2, sL2] = request.security(smtTicker, crtTF, [high[1], low[1], high[2], low[2]], lookahead = barmerge.lookahead_on)
+[tC1, tE1] = request.security(syminfo.tickerid, trendTF, [close[1], ta.ema(close, trendLen)[1]], lookahead = barmerge.lookahead_on)
+// KL：CRT 同級 / 較高時間框架 / 日線的 FVG 與 OB（日線那組的 high[1] / low[1] 就是 PDH / PDL）
+[aH1, aL1, aH3, aL3, aT3] = request.security(syminfo.tickerid, crtTF, [high[1], low[1], high[3], low[3], time[3]], lookahead = barmerge.lookahead_on)
+[aBT, aBB, aBTm, aST, aSB, aSTm] = request.security(syminfo.tickerid, crtTF, f_obCalc(), lookahead = barmerge.lookahead_on)
+[bH1, bL1, bH3, bL3, bT3] = request.security(syminfo.tickerid, klTF, [high[1], low[1], high[3], low[3], time[3]], lookahead = barmerge.lookahead_on)
+[bBT, bBB, bBTm, bST, bSB, bSTm] = request.security(syminfo.tickerid, klTF, f_obCalc(), lookahead = barmerge.lookahead_on)
+[pdh, pdl, dH3, dL3, dT3] = request.security(syminfo.tickerid, "D", [high[1], low[1], high[3], low[3], time[3]], lookahead = barmerge.lookahead_on)
+[dBT, dBB, dBTm, dST, dSB, dSTm] = request.security(syminfo.tickerid, "D", f_obCalc(), lookahead = barmerge.lookahead_on)
+
+newHTF = timeframe.change(crtTF)
+newB   = timeframe.change(klTF)
+bool dayChg = timeframe.change("D")
+int  tBias  = na(tC1) or na(tE1) ? 0 : tC1 > tE1 ? 1 : -1
+
+// ───────────────────────────── 全域狀態 ─────────────────────────────
+var array<CRT>   crts     = array.new<CRT>()
+var array<Sess>  sessions = array.new<Sess>()
+var array<Zone>  zones    = array.new<Zone>()
+var array<float> hO       = array.new<float>()
+var array<float> hH       = array.new<float>()
+var array<float> hL       = array.new<float>()
+var array<float> hC       = array.new<float>()
+var array<int>   hT       = array.new<int>()
+var array<float> hSwHi    = array.new<float>()
+var array<float> hSwLo    = array.new<float>()
+var array<float> swptHi   = array.new<float>()
+var array<int>   swptHiT  = array.new<int>()
+var array<float> swptLo   = array.new<float>()
+var array<int>   swptLoT  = array.new<int>()
+var array<float> avLv     = array.new<float>()
+var array<int>   avDr     = array.new<int>()
+var array<float> eqLv     = array.new<float>()
+var array<float> bfTop    = array.new<float>()
+var array<float> bfBot    = array.new<float>()
+var array<int>   bfT      = array.new<int>()
+var array<float> sfTop    = array.new<float>()
+var array<float> sfBot    = array.new<float>()
+var array<int>   sfT      = array.new<int>()
+// 統計：0 已結算進場 / 1 TP1 / 2 TP2 / 3 TP3 / 4 TP1 前先停損 / 5 逾時（沒到 TP1）/ 6～8 ΣR 全在 TP1～TP3 出場
+//       9 進場時已過 TP1 / 10 setup 數 / 11 沒觸發或失效 / 12 被過濾 / 13 TP4 / 14 ΣR 全在 TP4 出場
+//       15 ΣR 分批 + 保本（實際管理）/ 16 保本出場
+var array<float> stats    = array.new<float>(17, 0.0)
+// 各種進場訊號的使用次數（1～8）
+var array<float> kCnt     = array.new<float>(9, 0.0)
+// 今日：0 進場筆數 / 1 連續停損 / 2 今日 R
+var array<float> day      = array.new<float>(3, 0.0)
+var CRT lastCRT = na
+var int idSeq   = 0
+
+if barstate.isfirst
+    sessions.push(Sess.new("AS.", sAS, true))
+    sessions.push(Sess.new("TKO.", sTKO, true))
+    sessions.push(Sess.new("LD.", sLD, true))
+    sessions.push(Sess.new("NY.8", sNY8, true))
+    sessions.push(Sess.new("NY.9", sNY9, true))
+    sessions.push(Sess.new("亞洲盤", true, false))
+    sessions.push(Sess.new("倫敦盤", true, false))
+    sessions.push(Sess.new("開盤前", usePre, false))
+
+if dayChg
+    day.set(0, 0.0)
+    day.set(1, 0.0)
+    day.set(2, 0.0)
+
+int  nyMin  = hour(time, NY) * 60 + minute(time, NY)
+bool inNews = newsMin > 0 and math.abs(nyMin - 510) <= newsMin
+string dayBlock = maxDaily > 0 and day.get(0) >= maxDaily ? "今日已進場 " + str.tostring(maxDaily) + " 筆" : maxLoss > 0 and day.get(1) >= maxLoss ? "今日連續停損 " + str.tostring(maxLoss) + " 次，先休息" : inNews ? "8:30 數據前後" : ""
+
+// ───────────────────────────── 目前高時間 K 的高低點：時間與目前圖表 K 的位置 ─────────────────────────────
+var float runH  = na
+var float runL  = na
+var int   runHT = na
+var int   runLT = na
+var int   runHI = na
+var int   runLI = na
+var int   c1HIdx = na
+var int   c1LIdx = na
+int cHT = na
+int cLT = na
+if newHTF
+    cHT    := runHT
+    cLT    := runLT
+    c1HIdx := runHI
+    c1LIdx := runLI
+    runH   := high
+    runL   := low
+    runHT  := time
+    runLT  := time
+    runHI  := bar_index
+    runLI  := bar_index
+else
+    if na(runH) or high > runH
+        runH  := high
+        runHT := time
+        runHI := bar_index
+    if na(runL) or low < runL
+        runL  := low
+        runLT := time
+        runLI := bar_index
+
+// ───────────────────────────── LTF（目前圖表） ─────────────────────────────
+bool barDone = barstate.isconfirmed
+
+// 連續同色 K：起點（CISD）、以及推動之前那段反向 K（OB → 被破變 BB）
+bool isUp = close > open
+bool isDn = close < open
+var float upRunOpen   = na
+var int   upRunT      = na
+var float upRunHigh   = na
+var float dnRunOpen   = na
+var int   dnRunT      = na
+var float dnRunLow    = na
+var float bullBaseTop = na
+var float bullBaseBot = na
+var float bearBaseTop = na
+var float bearBaseBot = na
+var bool  bearCisdUsed = true
+var bool  bullCisdUsed = true
+if isUp and not isUp[1]
+    bullBaseTop  := dnRunOpen
+    bullBaseBot  := dnRunLow
+    upRunOpen    := open
+    upRunT       := time
+    upRunHigh    := high
+    bearCisdUsed := false
+else if isUp
+    upRunHigh := math.max(upRunHigh, high)
+if isDn and not isDn[1]
+    bearBaseTop  := upRunHigh
+    bearBaseBot  := upRunOpen
+    dnRunOpen    := open
+    dnRunT       := time
+    dnRunLow     := low
+    bullCisdUsed := false
+else if isDn
+    dnRunLow := math.min(dnRunLow, low)
+
+// 擺動點（MSS）與 QM 左肩
+ph  = ta.pivothigh(high, swingLen, swingLen)
+pl  = ta.pivotlow(low, swingLen, swingLen)
+hiN = ta.highest(high, swingLen + 1)
+loN = ta.lowest(low, swingLen + 1)
+var float swH      = na
+var int   swHIdx   = na
+var bool  swHUsed  = true
+var float swL      = na
+var int   swLIdx   = na
+var bool  swLUsed  = true
+var float swHPrevL = na
+var float swLPrevH = na
+var float legHi    = na
+var float legHiOp  = na
+var float legLo    = na
+var float legLoOp  = na
+if not na(ph)
+    int pIdx = bar_index - swingLen
+    swHPrevL := not na(swLIdx) and swLIdx < pIdx ? swL : na
+    swH      := ph
+    swHIdx   := pIdx
+    swHUsed  := false
+    legLo    := loN
+    legLoOp  := dnRunOpen
+else if not na(legLo) and low < legLo
+    legLo   := low
+    legLoOp := dnRunOpen
+if not na(pl)
+    int pIdx = bar_index - swingLen
+    swLPrevH := not na(swHIdx) and swHIdx < pIdx ? swH : na
+    swL      := pl
+    swLIdx   := pIdx
+    swLUsed  := false
+    legHi    := hiN
+    legHiOp  := upRunOpen
+else if not na(legHi) and high > legHi
+    legHi   := high
+    legHiOp := upRunOpen
+
+bool  bullMSS = false
+bool  bearMSS = false
+float bullLvl = na
+int   bullIdx = na
+float bearLvl = na
+int   bearIdx = na
+float bullQM  = na
+float bearQM  = na
+if not na(swH) and not swHUsed and close > swH
+    bullMSS := true
+    swHUsed := true
+    bullLvl := swH
+    bullIdx := swHIdx
+    bullQM  := swHPrevL
+if not na(swL) and not swLUsed and close < swL
+    bearMSS := true
+    swLUsed := true
+    bearLvl := swL
+    bearIdx := swLIdx
+    bearQM  := swLPrevH
+
+// 位移段裡最近的缺口（最近 3 根內形成）
+float bullGapTop = na
+float bullGapBot = na
+if low > high[2]
+    bullGapTop := low
+    bullGapBot := high[2]
+else if low[1] > high[3]
+    bullGapTop := low[1]
+    bullGapBot := high[3]
+else if low[2] > high[4]
+    bullGapTop := low[2]
+    bullGapBot := high[4]
+float bearGapTop = na
+float bearGapBot = na
+if high < low[2]
+    bearGapTop := low[2]
+    bearGapBot := high
+else if high[1] < low[3]
+    bearGapTop := low[3]
+    bearGapBot := high[1]
+else if high[2] < low[4]
+    bearGapTop := low[4]
+    bearGapBot := high[2]
+bool bullGap = not na(bullGapTop)
+bool bearGap = not na(bearGapTop)
+
+// 最近的 FVG（之後被收破就是 IFVG）
+if barDone and low > high[2]
+    bfTop.push(low)
+    bfBot.push(high[2])
+    bfT.push(time[1])
+    if bfTop.size() > 30
+        bfTop.shift()
+        bfBot.shift()
+        bfT.shift()
+if barDone and high < low[2]
+    sfTop.push(low[2])
+    sfBot.push(high)
+    sfT.push(time[1])
+    if sfTop.size() > 30
+        sfTop.shift()
+        sfBot.shift()
+        sfT.shift()
+
+bool bullMSSok = barDone and bullMSS and (not needGap or bullGap)
+bool bearMSSok = barDone and bearMSS and (not needGap or bearGap)
+
+// MSS 時的 LTF OB：位移前那段連續反向 K（第一根開盤價 → 最遠影線）；不合理就用缺口
+float bullOBTop = na
+float bullOBBot = na
+if bullMSS
+    if not na(legLo) and not na(legLoOp) and legLoOp > legLo and legLoOp < close
+        bullOBTop := legLoOp
+        bullOBBot := legLo
+    else if bullGap
+        bullOBTop := bullGapTop
+        bullOBBot := bullGapBot
+float bearOBTop = na
+float bearOBBot = na
+if bearMSS
+    if not na(legHi) and not na(legHiOp) and legHiOp < legHi and legHiOp > close
+        bearOBTop := legHi
+        bearOBBot := legHiOp
+    else if bearGap
+        bearOBTop := bearGapTop
+        bearOBBot := bearGapBot
+
+// C3 期間的一般 CISD（標示用）
+bool bearCISD = false
+bool bullCISD = false
+if not bearCisdUsed and not na(upRunOpen) and isDn and close < upRunOpen
+    bearCISD     := barDone
+    bearCisdUsed := true
+if not bullCisdUsed and not na(dnRunOpen) and isUp and close > dnRunOpen
+    bullCISD     := barDone
+    bullCisdUsed := true
+
+// ───────────────────────────── 時段區間（1H：CRT Range Time 概念；Killzone / 開盤前：只當 KL） ─────────────────────────────
+inAS   = not na(time(timeframe.period, "1800-1900:1234567", NY))
+inTKO  = not na(time(timeframe.period, "2100-2200:1234567", NY))
+inLD   = not na(time(timeframe.period, "0200-0300:1234567", NY))
+inNY8  = not na(time(timeframe.period, "0800-0900:1234567", NY))
+inNY9  = not na(time(timeframe.period, "0900-1000:1234567", NY))
+kzAsia = not na(time(timeframe.period, "2000-2359:1234567", NY))
+kzLon  = not na(time(timeframe.period, "0200-0500:1234567", NY))
+kzNYAM = not na(time(timeframe.period, "0930-1200:1234567", NY))
+kzNYPM = not na(time(timeframe.period, "1430-1700:1234567", NY))
+inPre  = not na(time(timeframe.period, "0000-0930:1234567", NY))
+inArr  = array.from(inAS, inTKO, inLD, inNY8, inNY9, kzAsia, kzLon, inPre)
+
+// 時段區間有效到下一個紐約 17:00（交易日結束）
+f_dayEnd(int t) =>
+    int y = year(t, NY)
+    int m = month(t, NY)
+    int d = dayofmonth(t, NY)
+    int e = timestamp(NY, y, m, d, 17, 0, 0)
+    e <= t ? e + 86400000 : e
+
+if sessOK and sessions.size() == 8
+    for i = 0 to 7
+        Sess s   = sessions.get(i)
+        bool inS = inArr.get(i)
+        bool drw = showSess and s.draw
+        if s.enabled
+            if inS and not s.forming
+                s.forming := true
+                s.ready   := false
+                s.hi      := high
+                s.lo      := low
+                s.startT  := time
+                s.brokeH  := false
+                s.brokeL  := false
+            else if inS and s.forming
+                s.hi := math.max(s.hi, high)
+                s.lo := math.min(s.lo, low)
+            if not inS and s.forming
+                s.forming := false
+                s.ready   := true
+                s.endT    := f_dayEnd(s.startT)
+                if drw
+                    s.lnH := line.new(s.startT, s.hi, time, s.hi, xloc = xloc.bar_time, color = color.new(sessCol, 45), style = line.style_dotted, width = 1)
+                    s.lnL := line.new(s.startT, s.lo, time, s.lo, xloc = xloc.bar_time, color = color.new(sessCol, 45), style = line.style_dotted, width = 1)
+                    label.new(s.startT, s.hi, s.name, xloc = xloc.bar_time, style = label.style_label_lower_left, color = color(na), textcolor = color.new(sessCol, 25), size = size.small)
+            if s.ready and not s.forming
+                if time < s.endT
+                    if drw
+                        s.lnH.set_x2(time)
+                        s.lnL.set_x2(time)
+                    if not s.brokeH and high > s.hi
+                        s.brokeH := true
+                        if drw and sessMark
+                            label.new(bar_index, high, "▲" + s.name, style = label.style_label_down, color = color(na), textcolor = sessCol, size = size.small)
+                        if alSess and s.draw
+                            alert(syminfo.ticker + " — " + s.name + " High Broken ▲\nRange : " + s.name + "\nPrice : " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+                    if not s.brokeL and low < s.lo
+                        s.brokeL := true
+                        if drw and sessMark
+                            label.new(bar_index, low, "▼" + s.name, style = label.style_label_up, color = color(na), textcolor = sessCol, size = size.small)
+                        if alSess and s.draw
+                            alert(syminfo.ticker + " — " + s.name + " Low Broken ▼\nRange : " + s.name + "\nPrice : " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+                else
+                    s.ready := false
+
+// ───────────────────────────── KL 區塊：OB / BB / FVG / IFVG（同級 / 較高 / 日線）、供需區 ─────────────────────────────
+f_zoneName(Zone z) =>
+    z.kind == "SD" ? z.tf + " 供需區" : z.tf + " " + (z.kind == "FVG" ? (z.inv ? "IFVG" : "FVG") : (z.inv ? "BB" : "OB"))
+
+f_newZone(int d, float top, float bot, string kind, int t, string tfn) =>
+    Zone z = Zone.new(d, top, bot, kind, tfn)
+    if showKLz
+        color col = d > 0 ? bullCol : bearCol
+        z.bx := box.new(t, top, time, bot, xloc = xloc.bar_time, border_color = color.new(col, 60), bgcolor = color.new(col, 88), text = f_zoneName(z), text_size = size.small, text_color = color.new(col, 20), text_halign = text.align_right)
+    zones.push(z)
+    while zones.size() > maxZone
+        Zone old = zones.shift()
+        if not na(old.bx)
+            old.bx.delete()
+    true
+
+f_addZones(bool on, bool chg, string tfn, float h1, float l1, float h3, float l3, int t3, float obt, float obb, int obtm, float ost, float osb, int ostm) =>
+    if on and chg
+        if not na(h3) and not na(l1) and l1 > h3
+            f_newZone(1, l1, h3, "FVG", t3, tfn)
+        if not na(l3) and not na(h1) and h1 < l3
+            f_newZone(-1, l3, h1, "FVG", t3, tfn)
+        if not na(obt) and not na(obb) and obt > obb
+            f_newZone(1, obt, obb, "OB", obtm, tfn)
+        if not na(ost) and not na(osb) and ost > osb
+            f_newZone(-1, ost, osb, "OB", ostm, tfn)
+    true
+
+f_addZones(tfOK and klSame, newHTF, crtName, aH1, aL1, aH3, aL3, aT3, aBT, aBB, aBTm, aST, aSB, aSTm)
+f_addZones(tfOK and tfB_ok, newB, klTFName, bH1, bL1, bH3, bL3, bT3, bBT, bBB, bBTm, bST, bSB, bSTm)
+f_addZones(tfOK and klDay and tfD_ok, dayChg, "D", pdh, pdl, dH3, dL3, dT3, dBT, dBB, dBTm, dST, dSB, dSTm)
+
+// 被收盤反向穿過：OB → BB、FVG → IFVG（角色反轉）；反轉後再被穿過、或供需區被穿過，就移除
+if zones.size() > 0
+    for i = zones.size() - 1 to 0
+        Zone z = zones.get(i)
+        bool thru = z.dir > 0 ? close < z.bot : close > z.top
+        if thru
+            if z.inv or z.kind == "SD"
+                if not na(z.bx)
+                    z.bx.delete()
+                zones.remove(i)
+            else
+                z.inv := true
+                z.dir := -z.dir
+                if not na(z.bx)
+                    color col = z.dir > 0 ? bullCol : bearCol
+                    z.bx.set_bgcolor(color.new(col, 90))
+                    z.bx.set_border_color(color.new(col, 60))
+                    z.bx.set_text(f_zoneName(z))
+                    z.bx.set_text_color(color.new(col, 20))
+                    z.bx.set_right(time)
+        else if not na(z.bx)
+            z.bx.set_right(time)
+
+// ───────────────────────────── CRT 時間框架：K 棒紀錄、前高前低、A / V、EQ 50%、供需區 ─────────────────────────────
+if hSwHi.size() > 0
+    for i = hSwHi.size() - 1 to 0
+        float v = hSwHi.get(i)
+        if high > v
+            swptHi.push(v)
+            swptHiT.push(time)
+            hSwHi.remove(i)
+if hSwLo.size() > 0
+    for i = hSwLo.size() - 1 to 0
+        float v = hSwLo.get(i)
+        if low < v
+            swptLo.push(v)
+            swptLoT.push(time)
+            hSwLo.remove(i)
+while swptHi.size() > 20
+    swptHi.shift()
+    swptHiT.shift()
+while swptLo.size() > 20
+    swptLo.shift()
+    swptLoT.shift()
+
+if tfOK and newHTF and not na(kH)
+    // A / V 被實體收破就失效
+    if avLv.size() > 0
+        for i = avLv.size() - 1 to 0
+            float v = avLv.get(i)
+            int   d = avDr.get(i)
+            if (d < 0 and kC > v) or (d > 0 and kC < v)
+                avLv.remove(i)
+                avDr.remove(i)
+    hO.push(kO)
+    hH.push(kH)
+    hL.push(kL)
+    hC.push(kC)
+    hT.push(kT)
+    while hH.size() > 40
+        hO.shift()
+        hH.shift()
+        hL.shift()
+        hC.shift()
+        hT.shift()
+    int n = hH.size()
+    // A 水平：陽線收盤接陰線（收盤價做出的局部高點）；V 水平反過來
+    if useAV and n >= 3
+        float o1 = hO.get(n - 2)
+        float c1 = hC.get(n - 2)
+        float o2 = hO.get(n - 3)
+        float c2 = hC.get(n - 3)
+        if c1 > o1 and kC < kO and c1 > math.max(o2, c2)
+            avLv.push(math.max(c1, kO))
+            avDr.push(-1)
+        if c1 < o1 and kC > kO and c1 < math.min(o2, c2)
+            avLv.push(math.min(c1, kO))
+            avDr.push(1)
+        while avLv.size() > 20
+            avLv.shift()
+            avDr.shift()
+    // EQ 50%：大 K 的中線
+    if useEQ and not na(hAtr) and kH - kL >= 2 * hAtr
+        eqLv.push((kH + kL) / 2)
+        while eqLv.size() > 10
+            eqLv.shift()
+    // 供需區：3 根小 K 密集重疊，接著一根大 K 離開
+    if useSD and n >= 4 and not na(hAtr)
+        float bH  = math.max(hH.get(n - 2), math.max(hH.get(n - 3), hH.get(n - 4)))
+        float bL  = math.min(hL.get(n - 2), math.min(hL.get(n - 3), hL.get(n - 4)))
+        float mxL = math.max(hL.get(n - 2), math.max(hL.get(n - 3), hL.get(n - 4)))
+        float mnH = math.min(hH.get(n - 2), math.min(hH.get(n - 3), hH.get(n - 4)))
+        bool small = hH.get(n - 2) - hL.get(n - 2) <= 0.8 * hAtr and hH.get(n - 3) - hL.get(n - 3) <= 0.8 * hAtr and hH.get(n - 4) - hL.get(n - 4) <= 0.8 * hAtr
+        bool disp  = math.abs(kC - kO) >= 1.2 * hAtr
+        if small and mxL < mnH and disp
+            if kC < bL
+                f_newZone(-1, bH, bL, "SD", hT.get(n - 4), crtName)
+            else if kC > bH
+                f_newZone(1, bH, bL, "SD", hT.get(n - 4), crtName)
+    // 前高 / 前低（5 根擺動點）
+    if n >= 5
+        float midH = hH.get(n - 3)
+        float midL = hL.get(n - 3)
+        if midH > hH.get(n - 5) and midH > hH.get(n - 4) and midH > hH.get(n - 2) and midH > hH.get(n - 1)
+            hSwHi.push(midH)
+        if midL < hL.get(n - 5) and midL < hL.get(n - 4) and midL < hL.get(n - 2) and midL < hL.get(n - 1)
+            hSwLo.push(midL)
+    while hSwHi.size() > 30
+        hSwHi.shift()
+    while hSwLo.size() > 30
+        hSwLo.shift()
+
+// ───────────────────────────── 工具函式 ─────────────────────────────
+f_px(float p) =>
+    na(p) ? "—" : str.tostring(p, format.mintick)
+
+f_rTxt(float r) =>
+    na(r) ? "—" : r <= 0 ? "已過進場價" : str.tostring(r, "#.##") + "R"
+
+f_rShort(float r) =>
+    na(r) ? "" : r <= 0 ? "—" : str.tostring(r, "#.#") + "R"
+
+f_pickR(float a1, float a2, float a3, float a4) =>
+    rrTarget == "TP1" ? a1 : rrTarget == "TP2" ? a2 : rrTarget == "TP3" ? a3 : a4
+
+// 分批比例（合計不是 100 就按比例換算）
+float wSum = math.max(1, wTP1 + wTP2 + wTP3 + wTP4)
+float w1 = wTP1 / wSum
+float w2 = wTP2 / wSum
+float w3 = wTP3 / wSum
+float w4 = wTP4 / wSum
+
+f_sessTag(int t) =>
+    int hh = hour(t, NY)
+    int mm = minute(t, NY)
+    mm != 0 ? "" : hh == 18 ? "AS." : hh == 21 ? "TKO." : hh == 2 ? "LD." : hh == 8 ? "NY.8" : hh == 9 ? "NY.9" : ""
+
+// 進場訊號的名稱與說明
+f_kName(int k) =>
+    k == 1 ? "① CISD 收盤" : k == 2 ? "② 回踩 CISD" : k == 3 ? "③ 回踩 IFVG" : k == 4 ? "④ 回踩 LTF OB" : k == 5 ? "⑤ QM 左肩" : k == 6 ? "⑥ 回測 BB" : k == 7 ? "⑦ FIB " + str.tostring(fibLvl) : k == 8 ? "⑧ C2 收盤" : "等 LTF 訊號"
+
+f_kDesc(int k, bool bear) =>
+    string brk = bear ? "跌破" : "漲破"
+    string s = ""
+    if k == 1
+        s := "帶缺口收盤" + brk + " CISD（掃" + (bear ? "高" : "低") + "點那段連續" + (bear ? "陽" : "陰") + "線第一根的開盤價），那根收盤進"
+    else if k == 2
+        s := "CISD 被帶缺口" + brk + "後，價格回踩 CISD 價位成交"
+    else if k == 3
+        s := "推" + (bear ? "上去" : "下來") + "那段留下的" + (bear ? "多" : "空") + "方 FVG 被收盤" + brk + "變 IFVG，回踩 IFVG " + (bear ? "下" : "上") + "緣成交"
+    else if k == 4
+        s := "LTF 帶缺口 MSS 後，回踩 LTF OB、留影線收回，那根收盤進（A+）"
+    else if k == 5
+        s := "掃" + (bear ? "高" : "低") + "（頭）之後" + brk + "前" + (bear ? "低" : "高") + "（MSS），回到左肩成交（QM）"
+    else if k == 6
+        s := "推" + (bear ? "上去" : "下來") + "之前那段連續" + (bear ? "陰" : "陽") + "線（OB）被收盤" + brk + "變 BB，回測 BB " + (bear ? "下" : "上") + "緣成交"
+    else if k == 7
+        s := "CISD 被帶缺口" + brk + "後，從掃點拉到之後的極值，在 " + str.tostring(fibLvl) + " 回撤成交"
+    else if k == 8
+        s := "CRT 一確認就用 C2 收盤價進（不等 LTF）"
+    s
+
+// 掃蕩（CRH → 掃點，做多反過來）有沒有打到 Key Level：回傳 [KL 名稱, 上緣, 下緣]，沒有就回傳 ""
+f_klCheck(int dir, float rH, float rL, float ext, int c1T, int c2T) =>
+    float tol = (rH - rL) * klTolPct / 100
+    float lo  = dir < 0 ? rH - tol : ext - tol
+    float hi  = dir < 0 ? ext + tol : rL + tol
+    float eqT = na(hAtr) ? tol : hAtr * 0.1
+    string name = ""
+    float  kt   = na
+    float  kb   = na
+    // 1) 被掃掉的前高 / 前低（OHP / OLP）
+    if dir < 0
+        for [j, v] in swptHi
+            if name == "" and swptHiT.get(j) >= c2T and v >= lo and v <= hi
+                name := "前高（OHP）"
+                kt   := v
+                kb   := v
+    else
+        for [j, v] in swptLo
+            if name == "" and swptLoT.get(j) >= c2T and v >= lo and v <= hi
+                name := "前低（OLP）"
+                kt   := v
+                kb   := v
+    // 2) EQH / EQL：兩根以上 K 的高（低）點幾乎一樣，到 C1 為止都沒被拿走
+    int ci = hT.indexof(c1T)
+    if name == "" and ci >= 1
+        int i0 = math.max(0, ci - 30)
+        for i = i0 to ci - 1
+            for j = i + 1 to ci
+                if name == ""
+                    float a = dir < 0 ? hH.get(i) : hL.get(i)
+                    float b = dir < 0 ? hH.get(j) : hL.get(j)
+                    if math.abs(a - b) <= eqT
+                        float lv = dir < 0 ? math.max(a, b) : math.min(a, b)
+                        bool intact = lv >= lo and lv <= hi
+                        if intact and j < ci
+                            for k = j + 1 to ci
+                                if dir < 0 ? hH.get(k) > lv + eqT : hL.get(k) < lv - eqT
+                                    intact := false
+                        if intact
+                            name := dir < 0 ? "EQH" : "EQL"
+                            kt   := lv
+                            kb   := lv
+    // 3) PDH / PDL、昨日 EQ 50%
+    if name == "" and dir < 0 and not na(pdh) and pdh >= lo and pdh <= hi
+        name := "PDH"
+        kt   := pdh
+        kb   := pdh
+    if name == "" and dir > 0 and not na(pdl) and pdl >= lo and pdl <= hi
+        name := "PDL"
+        kt   := pdl
+        kb   := pdl
+    if name == "" and useEQ and not na(pdh) and not na(pdl)
+        float pdEq = (pdh + pdl) / 2
+        if pdEq >= lo and pdEq <= hi
+            name := "昨日 EQ 50%"
+            kt   := pdEq
+            kb   := pdEq
+    // 4) 時段 / Killzone / 開盤前高低點（不含 C1 自己那根）
+    if name == ""
+        for s in sessions
+            if name == "" and s.enabled and s.ready and not na(s.hi) and s.startT < c2T and s.startT != c1T
+                if dir < 0 and s.hi >= lo and s.hi <= hi
+                    name := s.name + " 高點"
+                    kt   := s.hi
+                    kb   := s.hi
+                else if dir > 0 and s.lo >= lo and s.lo <= hi
+                    name := s.name + " 低點"
+                    kt   := s.lo
+                    kb   := s.lo
+    // 5) A / V 水平
+    if name == "" and useAV
+        for [j, v] in avLv
+            if name == "" and avDr.get(j) == dir and v >= lo and v <= hi
+                name := dir < 0 ? "A 水平" : "V 水平"
+                kt   := v
+                kb   := v
+    // 6) 大 K 的 EQ 50%
+    if name == "" and useEQ
+        for v in eqLv
+            if name == "" and v >= lo and v <= hi
+                name := "EQ 50%"
+                kt   := v
+                kb   := v
+    // 7) OB / BB / FVG / IFVG / 供需區（方向要對：做空看壓力區、做多看支撐區）
+    if name == ""
+        for z in zones
+            if name == "" and z.dir == dir
+                bool ov = dir < 0 ? (z.bot <= ext + tol and z.top >= rH - tol) : (z.top >= ext - tol and z.bot <= rL + tol)
+                if ov
+                    name := f_zoneName(z)
+                    kt   := z.top
+                    kb   := z.bot
+    [name, kt, kb]
+
+// 目前價格上方 / 下方最近的 KL：回傳 [名稱, 上緣, 下緣, 最靠近現價的邊]
+f_nearKL(bool above) =>
+    string nm = ""
+    float  tp = na
+    float  bt = na
+    float  bp = na
+    for z in zones
+        bool ok = above ? (z.dir < 0 and z.top >= close) : (z.dir > 0 and z.bot <= close)
+        if ok
+            float edge = above ? math.max(z.bot, close) : math.min(z.top, close)
+            if na(bp) or (above ? edge < bp : edge > bp)
+                bp := edge
+                tp := z.top
+                bt := z.bot
+                nm := f_zoneName(z)
+    float  pv = above ? pdh : pdl
+    if not na(pv) and (above ? pv >= close : pv <= close) and (na(bp) or (above ? pv < bp : pv > bp))
+        bp := pv
+        tp := pv
+        bt := pv
+        nm := above ? "PDH" : "PDL"
+    for s in sessions
+        if s.enabled and s.ready
+            float v = above ? s.hi : s.lo
+            if not na(v) and (above ? v >= close : v <= close) and (na(bp) or (above ? v < bp : v > bp))
+                bp := v
+                tp := v
+                bt := v
+                nm := s.name + (above ? " 高點" : " 低點")
+    array<float> sw = above ? hSwHi : hSwLo
+    for v in sw
+        if (above ? v >= close : v <= close) and (na(bp) or (above ? v < bp : v > bp))
+            bp := v
+            tp := v
+            bt := v
+            nm := above ? "前高" : "前低"
+    if useAV
+        for [j, v] in avLv
+            if avDr.get(j) == (above ? -1 : 1) and (above ? v >= close : v <= close) and (na(bp) or (above ? v < bp : v > bp))
+                bp := v
+                tp := v
+                bt := v
+                nm := above ? "A 水平" : "V 水平"
+    [nm, tp, bt, bp]
+
+// TP3 / TP4：對側之外最近、第二近的流動性（前低 / 前高、PDH / PDL、時段 / Killzone 高低點）
+//            找不到就用區間延伸（TP3 = 1 倍、TP4 = 再多 1 倍）
+f_tp34(int dir, float rH, float rL) =>
+    float rng = rH - rL
+    float tol = rng * 0.05
+    float lim = dir < 0 ? rL - tol : rH + tol
+    array<float>  cv = array.new<float>()
+    array<string> cn = array.new<string>()
+    float pv = dir < 0 ? pdl : pdh
+    if not na(pv)
+        cv.push(pv)
+        cn.push(dir < 0 ? "PDL" : "PDH")
+    for s in sessions
+        float v = dir < 0 ? s.lo : s.hi
+        if s.enabled and s.ready and not na(v)
+            cv.push(v)
+            cn.push(s.name + (dir < 0 ? "L" : "H"))
+    array<float> sw = dir < 0 ? hSwLo : hSwHi
+    for v in sw
+        cv.push(v)
+        cn.push(dir < 0 ? "前低" : "前高")
+    // 最近的（TP3）
+    float b3 = na
+    string n3 = ""
+    for [j, v] in cv
+        if (dir < 0 ? v < lim : v > lim) and (na(b3) or (dir < 0 ? v > b3 : v < b3))
+            b3 := v
+            n3 := cn.get(j)
+    if na(b3)
+        b3 := dir < 0 ? rL - rng : rH + rng
+        n3 := "1:1 延伸"
+    // 再下一個（TP4）
+    float lim4 = dir < 0 ? b3 - tol : b3 + tol
+    float b4 = na
+    string n4 = ""
+    for [j, v] in cv
+        if (dir < 0 ? v < lim4 : v > lim4) and (na(b4) or (dir < 0 ? v > b4 : v < b4))
+            b4 := v
+            n4 := cn.get(j)
+    if na(b4)
+        b4 := dir < 0 ? b3 - rng : b3 + rng
+        n4 := "再延伸 1 倍"
+    [b3, n3, b4, n4]
+
+f_poor(float rH, float rL) =>
+    float r = na(hAtr) or hAtr == 0 ? na : (rH - rL) / hAtr
+    na(r) ? "" : r < minRng ? "區間偏小" : (maxRng > 0 and r > maxRng) ? "區間偏大" : ""
+
+// 以某個進場價計算 TP1（50%，太遠可改固定 R）與到 TP1～TP4 的 R（風險 = 進場到原始 SL）
+f_calcR(CRT c, float px) =>
+    bool  bear = c.dir < 0
+    float risk = bear ? c.sl - px : px - c.sl
+    float tp2  = bear ? c.rL : c.rH
+    float t1   = c.mid
+    if tp1Cap > 0 and risk > 0
+        float rMid = (bear ? px - c.mid : c.mid - px) / risk
+        if rMid > tp1Cap
+            t1 := bear ? px - tp1Cap * risk : px + tp1Cap * risk
+    float a1 = risk > 0 ? (bear ? px - t1 : t1 - px) / risk : na
+    float a2 = risk > 0 ? (bear ? px - tp2 : tp2 - px) / risk : na
+    float a3 = risk > 0 ? (bear ? px - c.tp3 : c.tp3 - px) / risk : na
+    float a4 = risk > 0 ? (bear ? px - c.tp4 : c.tp4 - px) / risk : na
+    [a1, a2, a3, a4, t1]
+
+f_setR(CRT c, float px) =>
+    [a1, a2, a3, a4, t1] = f_calcR(c, px)
+    c.r1   := a1
+    c.r2   := a2
+    c.r3   := a3
+    c.r4   := a4
+    c.t1Px := t1
+    f_pickR(a1, a2, a3, a4)
+
+// 掛單候選
+f_lv(CRT c, int k) =>
+    k == 2 ? c.lv2 : k == 3 ? c.lv3 : k == 5 ? c.lv5 : k == 6 ? c.lv6 : k == 7 ? c.lv7 : na
+
+f_ix(CRT c, int k) =>
+    k == 2 ? c.ix2 : k == 3 ? c.ix3 : k == 5 ? c.ix5 : k == 6 ? c.ix6 : k == 7 ? c.ix7 : na
+
+f_setLv(CRT c, int k, float lv, int ix) =>
+    if k == 2
+        c.lv2 := lv
+        c.ix2 := ix
+    else if k == 3
+        c.lv3 := lv
+        c.ix3 := ix
+    else if k == 5
+        c.lv5 := lv
+        c.ix5 := ix
+    else if k == 6
+        c.lv6 := lv
+        c.ix6 := ix
+    else if k == 7
+        c.lv7 := lv
+        c.ix7 := ix
+    true
+
+f_hasLv(CRT c) =>
+    not na(c.lv2) or not na(c.lv3) or not na(c.lv5) or not na(c.lv6) or not na(c.lv7)
+
+// 離現價最近的掛單：[價格, 種類]
+f_nearLv(CRT c) =>
+    float best = na
+    int   bk   = 0
+    for k = 2 to 7
+        float lv = f_lv(c, k)
+        if not na(lv) and (na(best) or math.abs(close - lv) < math.abs(close - best))
+            best := lv
+            bk   := k
+    [best, bk]
+
+// 預計的進場價與種類（還沒進場時用來估 R）
+f_plan(CRT c) =>
+    float p = c.cisdLvl
+    int   k = 0
+    if c.entered
+        p := c.ePx
+        k := c.eKind
+    else
+        [lp, lk] = f_nearLv(c)
+        if not na(lp)
+            p := lp
+            k := lk
+        else if eC1 or eC2 or eFB
+            k := eC1 ? 1 : eC2 ? 2 : 7
+        else if eOB and c.mss and not na(c.obTop)
+            p := c.dir < 0 ? c.obBot : c.obTop
+            k := 4
+        else if eCL
+            p := c.entry
+            k := 8
+    [p, k]
+
+f_planPx(CRT c) =>
+    [p, k] = f_plan(c)
+    p
+
+f_tsGapOK(CRT c) =>
+    na(c.c1Idx) or na(c.brIdx) or c.brIdx - c.c1Idx >= 2
+
+f_pdTxt(CRT c, float px) =>
+    c.dir < 0 ? (px >= c.mid ? "溢價區 ✓" : "折價區（理想是溢價）") : (px <= c.mid ? "折價區 ✓" : "溢價區（理想是折價）")
+
+// 進場前的過濾：溢價 / 折價、RR、順勢、（可選）每日規則；通過回傳 ""
+f_gate(CRT c, float px, bool withDay) =>
+    [a1, a2, a3, a4, t1] = f_calcR(c, px)
+    float rt   = f_pickR(a1, a2, a3, a4)
+    bool  bear = c.dir < 0
+    string why = ""
+    if na(rt)
+        why := "進場價已在停損外"
+    else if needPD and (bear ? px < c.mid : px > c.mid)
+        why := bear ? "在折價區" : "在溢價區"
+    else if minRR > 0 and rt < minRR
+        why := rrTarget + " 只有 " + f_rTxt(rt)
+    else if useTrend and tBias != 0 and tBias != c.dir
+        why := "逆 " + trendName + " 趨勢"
+    else if withDay and dayBlock != ""
+        why := dayBlock
+    why
+
+// CRT 本身的過濾（時段 / KL / 區間大小 / TBS / TS 間隔）；通過回傳 ""
+f_preGate(CRT c) =>
+    sessOnly and crtSec == 3600 and c.sess == "" ? "不是時段 CRT" : klOnly and not c.kl ? "附近沒有 KL" : hidePoor and c.poor != "" ? c.poor : tbsOnly and not c.tbs ? "不是 TBS（只有影線掃）" : tsGap and not f_tsGapOK(c) ? "TS 沒間隔 1 根 K" : ""
+
+// 確認（或激進進場）時補齊資訊：KL、區間大小、SMT、TP3、R
+f_info(CRT c, bool withSmt) =>
+    c.sess := crtSec == 3600 ? f_sessTag(c.t1) : ""
+    [kn, kt, kb] = f_klCheck(c.dir, c.rH, c.rL, c.ext, c.t1, c.t2)
+    c.kl     := kn != ""
+    c.klName := kn
+    c.klTop  := kt
+    c.klBot  := kb
+    c.poor   := f_poor(c.rH, c.rL)
+    if withSmt and useSMT and not na(sH1) and not na(sH2) and not na(sL1) and not na(sL2)
+        bool cmpSwept = c.dir < 0 ? (smtInv ? sL1 < sL2 : sH1 > sH2) : (smtInv ? sH1 > sH2 : sL1 < sL2)
+        c.smt := cmpSwept ? 0 : 1
+    [t3, t3n, t4, t4n] = f_tp34(c.dir, c.rH, c.rL)
+    c.tp3     := t3
+    c.tp3Name := t3n
+    c.tp4     := t4
+    c.tp4Name := t4n
+    f_setR(c, f_planPx(c))
+    c.kl
+
+f_score(CRT c) =>
+    2 + (c.kl ? 1 : 0) + (c.mss ? 1 : 0) + (c.retest ? 1 : 0)
+
+f_pct(float a, float b) =>
+    str.tostring(math.round(100 * a / b)) + "%"
+
+f_sgn(float x) =>
+    (x >= 0 ? "+" : "") + str.tostring(x, "#.##")
+
+f_waitTxt(CRT c) =>
+    [lp, lk] = f_nearLv(c)
+    string s = ""
+    string brk = c.dir < 0 ? "跌破" : "漲破"
+    string back = c.dir < 0 ? "上方" : "下方"
+    bool   ok   = c.cbHit and (c.cbGap or not needGap)
+    if not na(lp)
+        s := "掛單 " + (c.dir < 0 ? "SELL" : "BUY") + " LIMIT " + f_px(lp) + "（" + f_kName(lk) + "）"
+    else if c.cbHit and not ok
+        s := "已收盤" + brk + " CISD，但還沒留缺口 → 還沒進場"
+    else if not c.cbHit
+        s := (c.touchNB ? "碰到 CISD " + f_px(c.cisdLvl) + " 但收盤沒" + brk + " → 還沒進場；" : "") + "等 LTF 帶缺口收盤" + brk + " CISD " + f_px(c.cisdLvl)
+    else
+        s := "CISD " + f_px(c.cisdLvl) + " 已經" + brk + "過了，但那時還不能進場（① 只算" + brk + "的那一根）→ 等回踩掛單；價格先收回 CISD " + back + "、再收盤" + brk + "，① 會重新算" + (c.note != "" ? "；被過濾：" + c.note : "")
+    s
+
+// 圖上短版的等待原因
+f_waitShort(CRT c) =>
+    string brk = c.dir < 0 ? "跌破" : "漲破"
+    bool   ok  = c.cbHit and (c.cbGap or not needGap)
+    f_hasLv(c) ? "掛單中" : c.cbHit and not ok ? "CISD 已破，等缺口" : not c.cbHit ? (c.touchNB ? "碰到 CISD 沒收破" : "等收盤" + brk + " CISD") : c.note != "" ? "CISD 已破 · 訊號被過濾（看提示）" : "CISD 已破，等回踩掛單"
+
+// 所有掛單候選（提示用）
+f_pendTxt(CRT c) =>
+    string s = ""
+    for k = 2 to 7
+        float lv = f_lv(c, k)
+        if not na(lv)
+            [a1, a2, a3, a4, t1] = f_calcR(c, lv)
+            s += "\n　掛單 " + f_kName(k) + " " + f_px(lv) + " · " + rrTarget + " " + f_rTxt(f_pickR(a1, a2, a3, a4))
+    s
+
+f_stateTxt(CRT c) =>
+    c.state == 0 ? (c.confirmed or c.multi ? "再掃中（M3）· " : "C2 還沒收盤 · ") : c.state == 2 ? "收在區間外，等收回 " + str.tostring(c.waitCnt) + "/" + str.tostring(m3Max) + " · " : ""
+
+// 已打到的目標
+f_hitTxt(CRT c) =>
+    (c.tp1 and not c.t1Skip ? " ✓TP1" : "") + (c.tp2 ? " ✓TP2" : "") + (c.tp3Hit ? " ✓TP3" : "") + (c.tp4Hit ? " ✓TP4" : "")
+
+// 目前停損的狀態
+f_slTxt(CRT c) =>
+    float s0 = c.sl
+    float sn = na(c.slNow) ? c.sl : c.slNow
+    sn == s0 ? "" : sn == c.ePx ? " · 停損已移到保本" : " · 停損已移到 TP1"
+
+f_status(CRT c) =>
+    string aggTxt = c.preConf ? (c.checked ? (c.c2ok ? " · C2 收盤確認 ✓" : " · ⚠ C2 沒收回") : " · C2 還沒收盤") : ""
+    c.done ? c.result : c.entered ? (c.preConf ? "激進進場 " : "已進場 ") + f_kName(c.eKind) + " " + f_px(c.ePx) + f_hitTxt(c) + f_slTxt(c) + aggTxt : f_stateTxt(c) + f_waitTxt(c) + (minRR > 0 ? "（" + rrRule + "）" : "")
+
+// 圖上主標籤第二行：短
+f_short(CRT c) =>
+    string s = ""
+    if c.done
+        s := c.entered ? (c.tp4Hit ? "✓ TP4" : c.tp3Hit ? "✓ TP3" : c.tp2 ? "✓ TP2" : c.tp1 and not c.t1Skip ? "✓ TP1" : c.stopped ? "✗ 停損" : "逾時") + " " + f_sgn(c.rz) + "R · " + f_kName(c.eKind) : c.skipTxt != "" ? c.skipTxt : "未進場"
+    else if c.entered
+        s := "持倉中 · " + f_kName(c.eKind) + f_hitTxt(c) + f_slTxt(c)
+    else if c.state == 2
+        s := "收在外，等收回"
+    else if c.state == 0
+        s := "再掃中"
+    else
+        s := f_waitShort(c)
+    s
+
+f_text(CRT c) =>
+    string s = (c.dir < 0 ? "▼ " : "▲ ") + "CRT" + (c.model != 1 ? " M" + str.tostring(c.model) : "") + (c.sess != "" ? " " + c.sess : "") + " · " + (c.tbs ? "TBS" : "TWS")
+    if c.model != 2
+        s += " · A+ " + str.tostring(f_score(c)) + "/5"
+    if c.smt == 1
+        s += " · SMT"
+    s += "\nKL：" + (c.kl ? c.klName : "無")
+    s += "\n" + f_short(c)
+    s
+
+f_t1Name(CRT c) =>
+    c.t1Px == c.mid ? "TP1 50%" : "TP1 " + str.tostring(tp1Cap) + "R"
+
+// 還沒掛單時，畫在 CISD 的那條線是「觸發線」，不是掛單
+f_trigTag(CRT c, int pk, float pp) =>
+    string brk  = c.dir < 0 ? "跌破" : "漲破"
+    string back = c.dir < 0 ? "線上" : "線下"
+    bool   ok   = c.cbHit and (c.cbGap or not needGap)
+    pk == 4 ? "④ 等回踩 LTF OB  " + f_px(pp) : pk == 8 ? "⑧ C2 收盤價  " + f_px(pp) : ok ? "CISD 已" + brk + "  " + f_px(pp) + "（① 用過了：先收回" + back + "、再" + brk + "才重新算）" : "CISD 觸發線  " + f_px(pp) + (c.cbHit ? "（已破 · 等缺口）" : "（收盤" + brk + (needGap ? " + 缺口" : "") + "才進場）")
+
+f_trigTip(CRT c, int pk) =>
+    string brk  = c.dir < 0 ? "跌破" : "漲破"
+    string back = c.dir < 0 ? "上方" : "下方"
+    bool   ok   = c.cbHit and (c.cbGap or not needGap)
+    pk == 4 or pk == 8 ? f_kDesc(pk, c.dir < 0) : ok ? "CISD 已經被" + brk + "過了。① 只算第一次" + brk + "的那一根；那時如果 CRT 還不能進場（C2 還沒收回、或收在區間外等收回），① 就用掉了。\n現在等回踩的掛單（②～⑥）。價格如果先收盤回到 CISD " + back + "（而且沒有掛單成交），① 會重新生效，下一次帶缺口收盤" + brk + "就進場。" + (c.note != "" ? "\n被過濾的訊號：" + c.note : "") : "這條是 CISD 觸發線，不是掛單：要等 LTF 的 K 棒收盤" + brk + "它" + (needGap ? "、並留下缺口" : "") + "，才算 ① 進場；只有影線碰到不算。" + (eC2 ? "\n破了之後回踩這條線，才會掛 ② 限價單。" : "")
+
+// 出場規則（一行）
+f_mgmtTxt() =>
+    "分批 TP1 " + str.tostring(math.round(w1 * 100)) + "% / TP2 " + str.tostring(math.round(w2 * 100)) + "% / TP3 " + str.tostring(math.round(w3 * 100)) + "% / TP4 " + str.tostring(math.round(w4 * 100)) + "%" + (beTP1 ? " · 到 TP1 保本" : "") + (trTP2 ? " · 到 TP2 停損移到 TP1" : "") + (holdMax > 0 ? " · 最多抱 " + str.tostring(holdMax) + " 根" : "")
+
+// 滑鼠提示：完整細節
+f_tip(CRT c) =>
+    [pp, pk] = f_plan(c)
+    bool   pend = not c.entered and f_hasLv(c)
+    string est  = not c.entered and not pend ? "（R 為估計）" : ""
+    string eTx  = c.entered ? "進場 " + f_kName(c.eKind) + " " + f_px(c.ePx) + "\n　" + f_kDesc(c.eKind, c.dir < 0) : pend ? "掛單中：" + f_pendTxt(c) : f_trigTag(c, pk, pp)
+    string tags = "KL：" + (c.kl ? c.klName + "（" + f_px(c.klBot) + (c.klTop != c.klBot ? "–" + f_px(c.klTop) : "") + "）" : "無") + "\nTS：" + (c.tbs ? "TBS" : "TWS") + (f_tsGapOK(c) ? "" : "（沒間隔 1 根）") + "\n位置：" + f_pdTxt(c, pp) + "\n" + (c.smt == 1 ? "SMT 背離 ✓\n" : c.smt == 0 ? "SMT ✗\n" : "") + (c.poor != "" ? "⚠" + c.poor + "\n" : "") + (c.note != "" ? "出現但被過濾的進場訊號：" + c.note + "\n" : "") + "A+：掃✓ KL" + (c.kl ? "✓" : "✗") + " CRT✓ MSS" + (c.mss ? "✓" : "✗") + " 回踩" + (c.retest ? "✓" : "✗") + "\n"
+    float  sn   = c.entered and not na(c.slNow) ? c.slNow : c.sl
+    string slTx = "SL " + f_px(c.sl) + (sn != c.sl ? " → 現在 " + f_px(sn) + (sn == c.ePx ? "（保本）" : "（TP1）") : "")
+    string pos  = c.entered ? "\n已實現 " + f_sgn(c.rz) + "R · 還剩 " + str.tostring(math.round(c.wRem * 100)) + "% 部位" : ""
+    tags + f_status(c) + "\n─────\nCRH " + f_px(c.rH) + " / CRL " + f_px(c.rL) + "\n" + slTx + "\n" + eTx + est + "\n" + f_t1Name(c) + " " + f_px(c.t1Px) + " · " + f_rTxt(c.r1) + "\nTP2 對側 " + f_px(c.dir < 0 ? c.rL : c.rH) + " · " + f_rTxt(c.r2) + "\nTP3 " + c.tp3Name + " " + f_px(c.tp3) + " · " + f_rTxt(c.r3) + "\nTP4 " + c.tp4Name + " " + f_px(c.tp4) + " · " + f_rTxt(c.r4) + "\n" + f_mgmtTxt() + pos
+
+f_outTxt(CRT c) =>
+    not c.entered ? (c.skipTxt != "" ? "✕" : c.done ? "–" : "…") : c.tp4Hit ? "✓4" : c.tp3Hit ? "✓3" : c.tp2 ? "✓2" : c.tp1 and not c.t1Skip ? "✓1" : c.stopped ? "✗" : c.done ? "○" : "…"
+
+f_kMark(int k) =>
+    k == 1 ? "①" : k == 2 ? "②" : k == 3 ? "③" : k == 4 ? "④" : k == 5 ? "⑤" : k == 6 ? "⑥" : k == 7 ? "⑦" : k == 8 ? "⑧" : ""
+
+f_cTxt(CRT c) =>
+    (c.dir < 0 ? "▼" : "▲") + (c.model == 2 ? "M2" : f_kMark(c.eKind) + f_outTxt(c))
+
+f_resText(CRT c) =>
+    string s = ""
+    if not c.entered
+        s := c.skipTxt != "" ? c.skipTxt : c.oppHit ? "未進場：已到對側" : "未進場：逾時"
+        if c.skipTxt == "" and c.note != ""
+            s += "（" + c.note + "）"
+    else
+        float sn = na(c.slNow) ? c.sl : c.slNow
+        s := c.tp4Hit ? "✓TP4" : c.tp3Hit ? "✓TP3" : c.tp2 ? "✓TP2" : c.tp1 and not c.t1Skip ? "✓TP1" : ""
+        if c.stopped
+            s := s == "" ? "✗ 停損" : s + (sn == c.ePx ? " → 保本出場" : sn != c.sl ? " → 停損（已移到 TP1）出場" : " → 回到停損")
+        else if not c.tp4Hit and c.wRem > 0.0001
+            s := s == "" ? "逾時（按現價結算）" : s + "（逾時，剩下按現價）"
+        if c.tp2 and c.age >= 1
+            s += " · 多根派發 M4"
+        s += " · 合計 " + f_sgn(c.rz) + "R · " + f_kName(c.eKind)
+    s
+
+// 右側價位標籤（短；打到的加 ✓；還沒成交時 R 前面加 ≈）
+f_levelText(CRT c) =>
+    [pp, pk] = f_plan(c)
+    bool   pend = not c.entered and f_hasLv(c)
+    string est  = not c.entered and not pend ? "≈" : ""
+    float  sn   = c.entered and not na(c.slNow) ? c.slNow : c.sl
+    string eTag = c.entered ? "進場 " + f_kName(c.eKind) + "  " + f_px(c.ePx) : pend ? "掛單 " + f_kName(pk) + "  " + f_px(pp) : f_trigTag(c, pk, pp)
+    c.lnSL.set_y1(sn)
+    c.lnSL.set_y2(sn)
+    c.lbSL.set_y(sn)
+    c.lbSL.set_text((c.stopped ? "✗ " : "") + (sn == c.sl ? "SL  " : sn == c.ePx ? "SL → 保本  " : "SL → TP1  ") + f_px(sn))
+    c.lbE.set_text(eTag)
+    c.lbE.set_tooltip(c.entered ? f_kDesc(c.eKind, c.dir < 0) : pend ? "掛單中：" + f_pendTxt(c) : f_trigTip(c, pk))
+    c.lbT1.set_text(c.t1Skip ? f_t1Name(c) + "  " + f_px(c.t1Px) + "  已過進場價（略過）" : (c.tp1 ? "✓ " : "") + f_t1Name(c) + "  " + f_px(c.t1Px) + "  " + est + f_rShort(c.r1))
+    c.lbT2.set_text((c.tp2 ? "✓ " : "") + (c.dir < 0 ? "TP2 CRL  " : "TP2 CRH  ") + f_px(c.dir < 0 ? c.rL : c.rH) + "  " + est + f_rShort(c.r2))
+    c.lbT3.set_text((c.tp3Hit ? "✓ " : "") + "TP3 " + c.tp3Name + "  " + f_px(c.tp3) + "  " + est + f_rShort(c.r3))
+    c.lbT4.set_text((c.tp4Hit ? "✓ " : "") + "TP4 " + c.tp4Name + "  " + f_px(c.tp4) + "  " + est + f_rShort(c.r4))
+
+// 進場後：風險 / 報酬區塊與進場標記（標出是哪一種進場訊號）
+f_entryMarks(CRT c) =>
+    bool  bear = c.dir < 0
+    float tp2  = bear ? c.rL : c.rH
+    if showZone
+        c.bxRisk := box.new(c.eT, math.max(c.ePx, c.sl), time, math.min(c.ePx, c.sl), xloc = xloc.bar_time, border_color = color(na), bgcolor = color.new(slCol, 82))
+        c.bxRwd  := box.new(c.eT, math.max(c.ePx, tp2), time, math.min(c.ePx, tp2), xloc = xloc.bar_time, border_color = color(na), bgcolor = color.new(tpCol, 85))
+    c.lbEntry := label.new(c.eT, c.ePx, (bear ? "▼ 進場 " : "▲ 進場 ") + f_kName(c.eKind), xloc = xloc.bar_time, style = bear ? label.style_label_down : label.style_label_up, color = enCol, textcolor = color.white, size = tagSz, tooltip = f_kDesc(c.eKind, bear))
+
+// LTF 結構（只畫最新訊號）：MSS 線、LTF OB / IFVG / BB 區塊、QM 左肩
+f_ltfDraw(CRT c) =>
+    color col = c.dir < 0 ? bearCol : bullCol
+    if showLTF
+        if c.mss and (eOB or eQM) and not na(c.mssIdx) and not na(c.mssLvl)
+            c.lnMSS := line.new(c.mssIdx, c.mssLvl, bar_index, c.mssLvl, color = col, style = line.style_dashed, width = 1)
+        if eOB and c.mss and not na(c.obTop)
+            c.bxOB := box.new(c.mssT, c.obTop, time, c.obBot, xloc = xloc.bar_time, border_color = color.new(col, 40), bgcolor = color.new(col, 82), text = "④ LTF OB", text_size = size.small, text_color = color.white, text_halign = text.align_right)
+        if eIF and not na(c.ifTop)
+            c.bxIF := box.new(c.ifT, c.ifTop, time, c.ifBot, xloc = xloc.bar_time, border_color = color.new(col, 40), bgcolor = color.new(col, 82), text = "③ IFVG", text_size = size.small, text_color = color.white, text_halign = text.align_right)
+        if eBB and c.bbAct and not na(c.bbTop)
+            c.bxBB := box.new(c.bbT, c.bbTop, time, c.bbBot, xloc = xloc.bar_time, border_color = color.new(col, 40), bgcolor = color.new(col, 82), text = "⑥ BB", text_size = size.small, text_color = color.white, text_halign = text.align_right)
+        if eQM and not na(c.qm) and not na(c.mssIdx)
+            c.lnQM := line.new(c.mssIdx, c.qm, bar_index, c.qm, color = col, style = line.style_dotted, width = 1)
+    c.detail
+
+// 掃到的 KL（只畫最新訊號）
+f_klDraw(CRT c) =>
+    if c.kl and not na(c.klTop)
+        if c.klTop == c.klBot
+            c.lnKL := line.new(c.t1, c.klTop, time, c.klTop, xloc = xloc.bar_time, color = klCol, style = line.style_dotted, width = 2)
+            c.lbKL := label.new(c.t1, c.klTop, "KL：" + c.klName, xloc = xloc.bar_time, style = c.dir < 0 ? label.style_label_lower_right : label.style_label_upper_right, color = color(na), textcolor = klCol, size = tagSz)
+        else
+            c.bxKL := box.new(c.t1, c.klTop, time, c.klBot, xloc = xloc.bar_time, border_color = color.new(klCol, 30), bgcolor = color.new(klCol, 85), text = "KL：" + c.klName, text_size = size.small, text_color = klCol, text_halign = text.align_left, text_valign = text.align_top)
+    c.kl
+
+// 最新訊號：完整畫出
+f_detailDraw(CRT c) =>
+    color col = c.dir < 0 ? bearCol : bullCol
+    float tp2 = c.dir < 0 ? c.rL : c.rH
+    float ep  = f_planPx(c)
+    c.detail := true
+    f_klDraw(c)
+    c.lnH  := line.new(c.t1, c.rH, time, c.rH, xloc = xloc.bar_time, color = rngCol, width = lnW)
+    c.lnL  := line.new(c.t1, c.rL, time, c.rL, xloc = xloc.bar_time, color = rngCol, width = lnW)
+    c.lnT1 := line.new(c.t2, c.t1Px, time, c.t1Px, xloc = xloc.bar_time, color = tpCol, style = line.style_dashed, width = lnW)
+    c.lnSL := line.new(c.extT, c.sl, time, c.sl, xloc = xloc.bar_time, color = slCol, width = lnW)
+    bool  pend = not c.entered and f_hasLv(c)
+    c.lnE  := line.new(c.entered ? c.eT : c.t2, ep, time, ep, xloc = xloc.bar_time, color = c.entered or pend ? enCol : color.new(enCol, 35), style = c.entered ? line.style_solid : pend ? line.style_dashed : line.style_dotted, width = lnW)
+    c.lnT3 := line.new(c.t2, c.tp3, time, c.tp3, xloc = xloc.bar_time, color = rngCol, style = line.style_dashed, width = lnW)
+    c.lnT4 := line.new(c.t2, c.tp4, time, c.tp4, xloc = xloc.bar_time, color = color.new(rngCol, 30), style = line.style_dotted, width = lnW)
+    c.lb   := label.new(c.extT, c.ext, f_text(c), xloc = xloc.bar_time, style = c.dir < 0 ? label.style_label_down : label.style_label_up, color = col, textcolor = color.white, size = tagSz, tooltip = f_tip(c))
+    if showHTFc
+        c.lbC1 := label.new(c.t1, c.dir < 0 ? c.rH : c.rL, "C1", xloc = xloc.bar_time, style = c.dir < 0 ? label.style_label_lower_left : label.style_label_upper_left, color = color(na), textcolor = rngCol, size = tagSz)
+    int xr = bar_index + 2
+    c.lbSL := label.new(xr, c.sl, "", style = label.style_label_left, color = slCol, textcolor = color.white, size = tagSz)
+    c.lbE  := label.new(xr, ep, "", style = label.style_label_left, color = c.entered or pend ? enCol : color.new(enCol, 45), textcolor = color.white, size = tagSz)
+    c.lbT1 := label.new(xr, c.t1Px, "", style = label.style_label_left, color = tpCol, textcolor = #062420, size = tagSz)
+    c.lbT2 := label.new(xr, tp2, "", style = label.style_label_left, color = tpCol, textcolor = #062420, size = tagSz)
+    c.lbT3 := label.new(xr, c.tp3, "", style = label.style_label_left, color = rngCol, textcolor = #241603, size = tagSz)
+    c.lbT4 := label.new(xr, c.tp4, "", style = label.style_label_left, color = color.new(rngCol, 30), textcolor = #241603, size = tagSz)
+    if c.entered
+        f_entryMarks(c)
+    f_ltfDraw(c)
+    f_levelText(c)
+
+// 觸發進場：以 px 為進場價重算 R / TP1，記下是哪一種訊號
+f_enter(CRT c, float px, int eb, int et, int kind) =>
+    f_setR(c, px)
+    c.entered := true
+    c.eKind   := kind
+    c.preConf := not c.confirmed
+    c.ePx     := px
+    c.eBar    := eb
+    c.eT      := et
+    c.slNow   := c.sl
+    c.wRem    := 1.0
+    c.rz      := 0.0
+    // TP1 已經在進場價後面（例如 ① 收盤時已經過了中線）→ 略過 TP1，它的部位併到 TP2，保本改在 TP2
+    if not na(c.r1) and c.r1 <= 0
+        c.tp1    := true
+        c.t1Skip := true
+    day.set(0, day.get(0) + 1)
+    kCnt.set(kind, kCnt.get(kind) + 1)
+    if c.detail
+        c.redraw := true
+    c.entered
+
+// 從詳細改成不顯示（舊訊號）
+f_clear(CRT c) =>
+    line.delete(c.lnH)
+    line.delete(c.lnL)
+    line.delete(c.lnT1)
+    line.delete(c.lnSL)
+    line.delete(c.lnE)
+    line.delete(c.lnT3)
+    line.delete(c.lnT4)
+    line.delete(c.lnMSS)
+    line.delete(c.lnQM)
+    line.delete(c.lnKL)
+    box.delete(c.bxRisk)
+    box.delete(c.bxRwd)
+    box.delete(c.bxOB)
+    box.delete(c.bxIF)
+    box.delete(c.bxBB)
+    box.delete(c.bxKL)
+    label.delete(c.lb)
+    label.delete(c.lbSL)
+    label.delete(c.lbE)
+    label.delete(c.lbT1)
+    label.delete(c.lbT2)
+    label.delete(c.lbT3)
+    label.delete(c.lbT4)
+    label.delete(c.lbC1)
+    label.delete(c.lbKL)
+    label.delete(c.lbCISD)
+    label.delete(c.lbRT)
+    label.delete(c.lbEntry)
+    c.lb     := na
+    c.lnMSS  := na
+    c.lnQM   := na
+    c.lnKL   := na
+    c.bxRisk := na
+    c.bxRwd  := na
+    c.bxOB   := na
+    c.bxIF   := na
+    c.bxBB   := na
+    c.bxKL   := na
+    c.detail := false
+
+// 舊訊號：小標記（①～⑧ 是用了哪種進場訊號），細節放 tooltip
+f_compact(CRT c) =>
+    color col = c.dir < 0 ? bearCol : bullCol
+    color bg  = c.entered or not c.done ? color.new(col, 30) : color.new(color.gray, 50)
+    c.lb := label.new(c.extT, c.ext, f_cTxt(c), xloc = xloc.bar_time, style = c.dir < 0 ? label.style_label_down : label.style_label_up, color = bg, textcolor = color.white, size = size.small, tooltip = f_text(c) + "\n" + f_tip(c))
+
+f_extend(CRT c) =>
+    if c.detail
+        c.lnH.set_x2(time)
+        c.lnL.set_x2(time)
+        c.lnT1.set_x2(time)
+        c.lnSL.set_x2(time)
+        c.lnE.set_x2(time)
+        c.lnT3.set_x2(time)
+        c.lnT4.set_x2(time)
+        if not na(c.lnKL)
+            c.lnKL.set_x2(time)
+        if not na(c.bxKL)
+            c.bxKL.set_right(time)
+        if not na(c.bxRisk)
+            c.bxRisk.set_right(time)
+        if not na(c.bxRwd)
+            c.bxRwd.set_right(time)
+        if not c.entered
+            if not na(c.bxOB)
+                c.bxOB.set_right(time)
+            if not na(c.bxIF)
+                c.bxIF.set_right(time)
+            if not na(c.bxBB)
+                c.bxBB.set_right(time)
+            if not na(c.lnQM)
+                c.lnQM.set_x2(bar_index)
+        int xr = bar_index + 2
+        c.lbSL.set_x(xr)
+        c.lbE.set_x(xr)
+        c.lbT1.set_x(xr)
+        c.lbT2.set_x(xr)
+        c.lbT3.set_x(xr)
+        c.lbT4.set_x(xr)
+    c.detail
+
+f_refresh(CRT c) =>
+    if c.detail
+        if not c.entered and not c.done
+            float pp = f_planPx(c)
+            f_setR(c, pp)
+            c.lnE.set_y1(pp)
+            c.lnE.set_y2(pp)
+            c.lbE.set_y(pp)
+            c.lnT1.set_y1(c.t1Px)
+            c.lnT1.set_y2(c.t1Px)
+            c.lbT1.set_y(c.t1Px)
+        c.lb.set_text(f_text(c))
+        c.lb.set_tooltip(f_tip(c))
+        f_levelText(c)
+    else if not na(c.lb)
+        c.lb.set_text(f_cTxt(c))
+        c.lb.set_tooltip(f_text(c) + "\n" + f_tip(c))
+    c.done
+
+// 結算一筆已進場的單。R 以實際進場價、原始 SL 計（無手續費 / 滑價）
+//   c.rz      = 依分批 + 保本規則實際拿到的 R
+//   stats 6/7/8/14 = 只用 TP1 / TP2 / TP3 / TP4 一個目標全部出場（同樣的保本規則）的結果，用來比較
+f_account(CRT c) =>
+    bool  bear = c.dir < 0
+    float risk = bear ? c.sl - c.ePx : c.ePx - c.sl
+    float mtm  = risk > 0 ? (bear ? c.ePx - close : close - c.ePx) / risk : 0.0
+    float sn   = na(c.slNow) ? c.sl : c.slNow
+    float rS   = risk > 0 ? (bear ? c.ePx - sn : sn - c.ePx) / risk : -1.0
+    if not c.stopped and c.wRem > 0.0001
+        c.rz := c.rz + c.wRem * mtm
+    bool  h1 = c.tp1 and not c.t1Skip
+    float o1 = h1 ? nz(c.r1) : c.stopped ? rS : mtm
+    float o2 = c.tp2 ? nz(c.r2) : c.stopped ? rS : mtm
+    float o3 = c.tp3Hit ? nz(c.r3) : c.stopped ? rS : mtm
+    float o4 = c.tp4Hit ? nz(c.r4) : c.stopped ? rS : mtm
+    stats.set(0, stats.get(0) + 1)
+    if h1
+        stats.set(1, stats.get(1) + 1)
+    if c.tp2
+        stats.set(2, stats.get(2) + 1)
+    if c.tp3Hit
+        stats.set(3, stats.get(3) + 1)
+    if c.tp4Hit
+        stats.set(13, stats.get(13) + 1)
+    if c.stopped and not h1
+        stats.set(4, stats.get(4) + 1)
+    if not c.stopped and not h1
+        stats.set(5, stats.get(5) + 1)
+    if c.stopped and h1
+        stats.set(16, stats.get(16) + 1)
+    stats.set(6, stats.get(6) + o1)
+    stats.set(7, stats.get(7) + o2)
+    stats.set(8, stats.get(8) + o3)
+    stats.set(14, stats.get(14) + o4)
+    stats.set(15, stats.get(15) + c.rz)
+    if not na(c.r1) and c.r1 <= 0
+        stats.set(9, stats.get(9) + 1)
+    day.set(2, day.get(2) + c.rz)
+    day.set(1, c.rz < 0 ? day.get(1) + 1 : 0.0)
+    true
+
+// 結束一筆（不論有沒有進場）
+f_finish(CRT c) =>
+    c.done   := true
+    if c.entered
+        f_account(c)
+    else if c.counted and c.skipTxt == ""
+        if c.note != ""
+            stats.set(12, stats.get(12) + 1)
+        else
+            stats.set(11, stats.get(11) + 1)
+    c.result := f_resText(c)
+    c.done
+
+// CRT 本身被過濾、跳過
+f_skipWhy(CRT c, string why) =>
+    c.skipTxt := "跳過：" + why
+    stats.set(12, stats.get(12) + 1)
+    f_finish(c)
+
+// 掛單通知
+f_limitAlert(CRT c, int k, float lv) =>
+    [a1, a2, a3, a4, t1] = f_calcR(c, lv)
+    syminfo.ticker + " — " + crtName + (c.dir < 0 ? " 空方 CRT 掛 SELL LIMIT " : " 多方 CRT 掛 BUY LIMIT ") + f_px(lv) + "\n訊號：" + f_kName(k) + "\n" + f_kDesc(k, c.dir < 0) + "\nKL：" + (c.kl ? c.klName : "無") + "\nSL " + f_px(c.sl) + "\nTP1 " + f_px(t1) + " · " + f_rTxt(a1) + "\nTP2 " + f_px(c.dir < 0 ? c.rL : c.rH) + " · " + f_rTxt(a2) + "\nTP3 " + f_px(c.tp3) + " · " + f_rTxt(a3) + "\nTP4 " + f_px(c.tp4) + " · " + f_rTxt(a4)
+
+// 掛單候選生效（濾網不過就記下原因、不用它）
+f_tryLv(CRT c, int k, float lv) =>
+    string why = f_gate(c, lv, false)
+    bool   ok  = why == ""
+    f_setLv(c, k, ok ? lv : na, ok ? bar_index : -1)
+    if not ok
+        c.note := f_kName(k) + " " + why
+    else if alLimit and (c.dir < 0 ? close < lv : close > lv)
+        alert(f_limitAlert(c, k, lv), alert.freq_once_per_bar)
+    ok
+
+// 把觸發條件歸零（掃點更新時）
+f_resetTrig(CRT c) =>
+    c.cbHit   := false
+    c.cbN     := 0
+    c.cbGap   := false
+    c.cbOKIdx := na
+    c.legX    := na
+    c.ifTop   := na
+    c.ifBot   := na
+    c.ifT     := na
+    c.bbAct   := false
+    c.bbT     := na
+    c.qm      := na
+    c.mss     := false
+    c.obTop   := na
+    c.obBot   := na
+    c.retest  := false
+    c.touchNB := false
+    c.note    := ""
+    for k = 2 to 7
+        f_setLv(c, k, na, na)
+    true
+
+// 新的掃點：更新掃點、停損、CISD、BB 來源，並把觸發條件歸零
+f_newExt(CRT c) =>
+    bool bear = c.dir < 0
+    c.ext  := bear ? high : low
+    c.extT := time
+    c.sl   := bear ? c.ext + slBuf * syminfo.mintick : c.ext - slBuf * syminfo.mintick
+    float lv = bear ? upRunOpen : dnRunOpen
+    if na(lv) or (bear ? (lv >= c.sl or lv <= c.rL) : (lv <= c.sl or lv >= c.rH))
+        lv := bear ? c.rH : c.rL
+    c.cisdLvl := lv
+    c.runT    := bear ? upRunT : dnRunT
+    float bt  = bear ? bullBaseTop : bearBaseTop
+    float bb  = bear ? bullBaseBot : bearBaseBot
+    bool  bok = not na(bt) and not na(bb) and bt > bb and (bear ? bt < c.ext : bb > c.ext)
+    c.bbTop := bok ? bt : na
+    c.bbBot := bok ? bb : na
+    f_resetTrig(c)
+
+// 激進：C2 收盤確認前就要進場 / 掛單 → 先補齊 KL 等資訊並過濾
+f_aggOK(CRT c) =>
+    bool ok = true
+    if not c.confirmed
+        f_info(c, false)
+        if not c.counted
+            c.counted := true
+            stats.set(10, stats.get(10) + 1)
+        string pre = f_preGate(c)
+        if pre != ""
+            ok := false
+            f_skipWhy(c, pre)
+    ok
+
+// 讓 c 變成最新訊號之前：取消其他還沒進場的 setup，上一筆最新的縮成小標記
+f_retire(CRT c, CRT prev) =>
+    for o in crts
+        if o.id != c.id and not o.done and not o.entered and (o.confirmed or f_hasLv(o))
+            f_finish(o)
+            o.result := "未進場：被新 CRT 取代"
+            f_refresh(o)
+    if not na(prev)
+        if prev.id != c.id
+            f_clear(prev)
+            if oldMode == "簡略"
+                f_compact(prev)
+    true
+
+f_entryAlert(CRT c) =>
+    syminfo.ticker + " — " + crtName + (c.dir < 0 ? " 空方 CRT 進場 SHORT" : " 多方 CRT 進場 LONG") + "\n訊號：" + f_kName(c.eKind) + "（" + timShort + "）\n" + f_kDesc(c.eKind, c.dir < 0) + "\nKL：" + (c.kl ? c.klName : "無") + " · " + (c.tbs ? "TBS" : "TWS") + "\n進場 " + f_px(c.ePx) + "\nSL " + f_px(c.sl) + "\n" + f_t1Name(c) + " " + f_px(c.t1Px) + " · " + f_rTxt(c.r1) + "\nTP2 " + f_px(c.dir < 0 ? c.rL : c.rH) + " · " + f_rTxt(c.r2) + "\nTP3 " + f_px(c.tp3) + " · " + f_rTxt(c.r3) + "\nTP4 " + f_px(c.tp4) + " · " + f_rTxt(c.r4) + "\n" + f_mgmtTxt()
+
+// 停損出場（原始 SL、保本、或移到 TP1 的停損），剩下的部位全部按停損價結算
+f_stopOut(CRT c) =>
+    bool  bear = c.dir < 0
+    float risk = bear ? c.sl - c.ePx : c.ePx - c.sl
+    float sn   = na(c.slNow) ? c.sl : c.slNow
+    float rS   = risk > 0 ? (bear ? c.ePx - sn : sn - c.ePx) / risk : -1.0
+    c.rz      := c.rz + c.wRem * rS
+    c.wRem    := 0.0
+    c.stopped := true
+    f_finish(c)
+
+// 進場後的出場管理：先看停損（同一根 K 同時碰到停損與目標 → 算停損，保守），再依序看 TP1 → TP4
+// 回傳這根 K 發生的事（給通知用）
+f_manage(CRT c) =>
+    bool   bear = c.dir < 0
+    float  sn   = na(c.slNow) ? c.sl : c.slNow
+    bool   hitS = sn == c.sl ? (bear ? high > sn : low < sn) : (bear ? high >= sn : low <= sn)
+    string ev   = ""
+    if hitS
+        ev := sn == c.sl ? "✗ 停損" : sn == c.ePx ? "保本出場" : "停損（已移到 TP1）出場"
+        f_stopOut(c)
+    else
+        if not c.tp1 and (bear ? low <= c.t1Px : high >= c.t1Px)
+            c.tp1  := true
+            c.rz   := c.rz + w1 * nz(c.r1)
+            c.wRem := c.wRem - w1
+            ev     := "✓ TP1" + (beTP1 ? "（停損移到保本 " + f_px(c.ePx) + "）" : "")
+            if beTP1
+                c.slNow := c.ePx
+        if c.tp1 and not c.tp2 and (bear ? low <= c.rL : high >= c.rH)
+            float wq = w2 + (c.t1Skip ? w1 : 0.0)
+            c.tp2  := true
+            c.rz   := c.rz + wq * nz(c.r2)
+            c.wRem := c.wRem - wq
+            if c.t1Skip
+                ev := ev + (ev == "" ? "" : " → ") + "✓ TP2" + (beTP1 ? "（停損移到保本 " + f_px(c.ePx) + "）" : "")
+                if beTP1
+                    c.slNow := c.ePx
+            else
+                ev := ev + (ev == "" ? "" : " → ") + "✓ TP2" + (trTP2 ? "（停損移到 TP1 " + f_px(c.t1Px) + "）" : "")
+                if trTP2
+                    c.slNow := c.t1Px
+        if c.tp2 and not c.tp3Hit and not na(c.tp3) and (bear ? low <= c.tp3 : high >= c.tp3)
+            c.tp3Hit := true
+            c.rz     := c.rz + w3 * nz(c.r3)
+            c.wRem   := c.wRem - w3
+            ev       := ev + (ev == "" ? "" : " → ") + "✓ TP3"
+        if c.tp3Hit and not c.tp4Hit and not na(c.tp4) and (bear ? low <= c.tp4 : high >= c.tp4)
+            c.tp4Hit := true
+            c.rz     := c.rz + c.wRem * nz(c.r4)
+            c.wRem   := 0.0
+            ev       := ev + (ev == "" ? "" : " → ") + "✓ TP4（全部出場）"
+        if c.wRem <= 0.0001
+            c.wRem := 0.0
+            f_finish(c)
+    ev
+
+// ───────────────────────────── 高時間 K 收盤：每個 CRT 的狀態 ─────────────────────────────
+if tfOK and newHTF and crts.size() > 0
+    for i = crts.size() - 1 to 0
+        CRT c = crts.get(i)
+        if c.done
+            crts.remove(i)
+            continue
+        bool bear   = c.dir < 0
+        bool inside = kC < c.rH and kC > c.rL
+        bool outS   = bear ? kC >= c.rH : kC <= c.rL
+        bool conf   = false
+        if c.entered
+            if c.state == 0 and c.sweepT == kT and not c.checked
+                c.checked := true
+                c.c2ok    := inside
+            if inside
+                c.state     := 1
+                c.confirmed := true
+            c.age := c.age + 1
+            if holdMax > 0 and c.age >= holdMax + (c.preConf ? 1 : 0)
+                f_finish(c)
+        else if c.state == 0 and c.sweepT == kT
+            bool other = bear ? kL <= c.rL : kH >= c.rH
+            if not c.confirmed and not c.multi and other
+                // C2 兩邊都掃：先掃的那一邊 = Model 2（C2 自己打到另一端）；另一邊不算
+                bool first = bear ? cHT < cLT : cLT < cHT
+                c.done := true
+                if first and showM2 and oldMode == "簡略"
+                    c.model  := 2
+                    c.result := "Model 2：C2 自己掃完並打到另一端（不列入統計）"
+                    f_compact(c)
+            else if inside
+                conf := true
+            else if outS and useM3 and c.waitCnt < m3Max
+                c.state   := 2
+                c.waitCnt := c.waitCnt + 1
+                c.multi   := true
+                c.tbs     := true
+            else if c.confirmed
+                f_finish(c)
+                c.result := "收在區間外，CRT 失效"
+            else
+                c.done := true
+        else if c.state == 2
+            if inside
+                conf := true
+            else if outS and c.waitCnt < m3Max
+                c.waitCnt := c.waitCnt + 1
+            else if c.confirmed
+                f_finish(c)
+                c.result := "沒有收回，CRT 失效"
+            else
+                c.done := true
+        else if c.state == 1
+            if outS and useM3
+                c.state   := 2
+                c.waitCnt := 1
+                c.multi   := true
+                c.tbs     := true
+                for k = 2 to 7
+                    f_setLv(c, k, na, na)
+            else if outS
+                f_finish(c)
+                c.result := "收在區間外，CRT 失效"
+            else
+                c.age := c.age + 1
+                if c.age >= c3Bars
+                    f_finish(c)
+        if conf
+            bool first = not c.confirmed
+            c.state     := 1
+            c.age       := 0
+            c.waitCnt   := 0
+            c.model     := c.multi ? 3 : 1
+            c.entry     := kC
+            c.confirmed := true
+            f_info(c, first and not c.multi)
+            if first and not c.counted
+                c.counted := true
+                stats.set(10, stats.get(10) + 1)
+                string pre = f_preGate(c)
+                if pre != ""
+                    f_skipWhy(c, pre)
+                    if oldMode == "簡略"
+                        f_compact(c)
+                else
+                    if eCL
+                        string why = f_gate(c, kC, true)
+                        if why == ""
+                            f_enter(c, kC, bar_index - 1, time, 8)
+                        else
+                            c.note := f_kName(8) + " " + why
+                    f_retire(c, lastCRT)
+                    lastCRT := c
+                    f_detailDraw(c)
+                    if alCRT
+                        alert(syminfo.ticker + " — " + crtName + (bear ? " 空方" : " 多方") + " CRT 確認（M" + str.tostring(c.model) + (c.sess != "" ? " · " + c.sess : "") + " · KL：" + c.klName + "）：" + f_waitTxt(c) + "\n" + f_tip(c), alert.freq_once_per_bar)
+                    if alEntry and c.entered
+                        alert(f_entryAlert(c), alert.freq_once_per_bar)
+            else if c.detail
+                c.redraw := true
+        if c.redraw and c.detail
+            c.redraw := false
+            f_clear(c)
+            f_detailDraw(c)
+        f_refresh(c)
+        if c.done
+            crts.remove(i)
+
+// ───────────────────────────── 每根 K：成交、再掃、LTF 結構、進場訊號、停損 / 目標 ─────────────────────────────
+if tfOK and crts.size() > 0
+    for i = crts.size() - 1 to 0
+        CRT c = crts.get(i)
+        if not c.done
+            f_extend(c)
+            bool bear   = c.dir < 0
+            bool newAct = false        // 這根剛進場或剛掛單
+            if c.entered
+                if bar_index > c.eBar
+                    string ev = f_manage(c)
+                    if ev != "" and alExit
+                        alert(syminfo.ticker + " — " + crtName + (bear ? " 空單 " : " 多單 ") + ev + " · 累計 " + f_sgn(c.rz) + "R" + (c.done ? "" : " · 還剩 " + str.tostring(math.round(c.wRem * 100)) + "%") + " · " + f_kName(c.eKind), alert.freq_once_per_bar)
+            else
+                bool canEnter = c.state == 1 or (entryTim == T_AGG and (bear ? close < c.rH : close > c.rL))
+                bool filled   = false
+                // 1) 掛單成交：價格往回走，先碰到的那一張成交（同一根又碰到停損 → 算虧損）
+                if canEnter and f_hasLv(c)
+                    float best = na
+                    int   bk   = 0
+                    for k = 2 to 7
+                        float lv = f_lv(c, k)
+                        int   ix = f_ix(c, k)
+                        if not na(lv) and not na(ix) and ix >= 0 and bar_index > ix and (bear ? high >= lv : low <= lv)
+                            if na(best) or (bear ? lv < best : lv > best)
+                                best := lv
+                                bk   := k
+                    bool openOK = bear ? open < c.sl : open > c.sl
+                    if not na(best) and openOK
+                        string why = bk == 7 ? f_gate(c, best, true) : dayBlock
+                        if why != ""
+                            c.note := f_kName(bk) + " " + why
+                            if bk == 7
+                                f_setLv(c, 7, na, -1)
+                        else
+                            float fpx = bear ? math.max(open, best) : math.min(open, best)
+                            f_enter(c, fpx, bar_index, time, bk)
+                            filled := true
+                            newAct := true
+                            if alEntry
+                                alert(f_entryAlert(c), alert.freq_once_per_bar)
+                            if bear ? high > c.sl : low < c.sl
+                                f_stopOut(c)
+                if not c.done and not filled
+                    // 2) 再掃更高（低）→ 掃點、停損、CISD 跟著移動（Model 3）
+                    if bear ? high > c.ext : low < c.ext
+                        f_newExt(c)
+                        if c.state != 0
+                            c.state  := 0
+                            c.sweepT := curT
+                        if curT != c.t2
+                            c.multi := true
+                        c.redraw := c.detail
+                    // 3) 確認後還沒進場就先到對側 → 錯過
+                    else if c.confirmed and (bear ? low <= c.rL : high >= c.rH)
+                        c.oppHit := true
+                        f_finish(c)
+                if not c.done and not c.entered
+                    c.legX := bear ? (na(c.legX) ? low : math.min(c.legX, low)) : (na(c.legX) ? high : math.max(c.legX, high))
+                    bool cisdOK  = c.cbHit and (c.cbGap or not needGap)
+                    bool cisdNew = false
+                    bool rtJust  = false
+                    if barDone
+                        color col = bear ? bearCol : bullCol
+                        // TBS：掃蕩中有實體收在區間外
+                        if c.state == 0 and (bear ? close > c.rH : close < c.rL)
+                            c.tbs := true
+                        // C2 掃完回到區間（還沒收盤）的提醒
+                        if alLive and c.state == 0 and not c.confirmed and not c.alLiveOK and (bear ? close < c.rH : close > c.rL)
+                            c.alLiveOK := true
+                            alert(syminfo.ticker + " — " + crtName + (bear ? " C2 掃 CRH 後回到區間（潛在空方 CRT，還沒收盤）" : " C2 掃 CRL 後回到區間（潛在多方 CRT，還沒收盤）") + " · CISD " + f_px(c.cisdLvl), alert.freq_once_per_bar)
+                        // CISD 被收盤破、帶缺口（破的那根或之後 2 根內）
+                        bool gapNow = bear ? bearGap : bullGap
+                        // 破了之後又收盤回到 CISD 另一側，而且沒有 ② 掛單可以接（那時還不能進場 / ② 沒開或被過濾）
+                        // → 這次突破不算，① 重新生效，等下一次收盤突破
+                        bool canNow = c.state == 1 or (entryTim == T_AGG and (bear ? close < c.rH : close > c.rL))
+                        if c.cbHit and na(c.lv2) and (not canNow or not eC2 or c.ix2 == -1) and (bear ? close > c.cisdLvl : close < c.cisdLvl)
+                            c.cbHit   := false
+                            c.cbN     := 0
+                            c.cbGap   := false
+                            c.cbOKIdx := na
+                            c.touchNB := false
+                            if c.ix2 == -1
+                                c.ix2 := na
+                        if c.cbHit and not c.cbGap and c.cbN >= 2
+                            c.cbHit := false   // 破了但 3 根內沒留缺口 → 不算，重新等
+                        if not c.cbHit and (bear ? close < c.cisdLvl : close > c.cisdLvl)
+                            c.cbHit := true
+                            c.cbN   := 0
+                            c.cbGap := gapNow
+                        else if c.cbHit and not c.cbGap and c.cbN < 2
+                            c.cbN   := c.cbN + 1
+                            c.cbGap := gapNow
+                        // 碰到 CISD 但收盤沒破（提示用：影線碰到不算進場）
+                        if not c.cbHit and (bear ? (low <= c.cisdLvl and close > c.cisdLvl) : (high >= c.cisdLvl and close < c.cisdLvl))
+                            c.touchNB := true
+                        cisdOK := c.cbHit and (c.cbGap or not needGap)
+                        if cisdOK and na(c.cbOKIdx)
+                            c.cbOKIdx := bar_index
+                            cisdNew   := true
+                        // IFVG：推上去（下來）那段留下的 FVG 被收盤反向穿過
+                        if na(c.ifTop) and not na(c.runT)
+                            int nF = bear ? bfTop.size() : sfTop.size()
+                            if nF > 0
+                                for k = nF - 1 to 0
+                                    if na(c.ifTop)
+                                        int   ft = bear ? bfT.get(k) : sfT.get(k)
+                                        float tp = bear ? bfTop.get(k) : sfTop.get(k)
+                                        float bt = bear ? bfBot.get(k) : sfBot.get(k)
+                                        if ft >= c.runT and ft <= c.extT and (bear ? close < bt : close > tp)
+                                            c.ifTop  := tp
+                                            c.ifBot  := bt
+                                            c.ifT    := time
+                                            c.redraw := c.detail
+                        // BB：推動之前那段反向 K（OB）被收盤穿過
+                        if not c.bbAct and not na(c.bbTop) and (bear ? close < c.bbBot : close > c.bbTop)
+                            c.bbAct  := true
+                            c.bbT    := time
+                            c.redraw := c.detail
+                        // C3 期間的一般 CISD 標示
+                        if (bear ? bearCISD : bullCISD) and not c.cisd
+                            c.cisd := true
+                            if c.detail and showCISD
+                                c.lbCISD := label.new(bar_index, bear ? high : low, "CISD", style = bear ? label.style_label_down : label.style_label_up, color = color.new(col, 40), textcolor = color.white, size = size.small)
+                        // LTF OB 被反向突破 → 作廢，等下一個 MSS
+                        if c.mss and not na(c.obTop) and not c.retest and (bear ? high > c.obTop : low < c.obBot)
+                            c.mss    := false
+                            c.obTop  := na
+                            c.obBot  := na
+                            c.redraw := c.detail
+                        // MSS（帶缺口）→ LTF OB、QM 左肩
+                        if (bear ? bearMSSok : bullMSSok) and not c.mss
+                            c.mss    := true
+                            c.mssT   := time
+                            c.mssLvl := bear ? bearLvl : bullLvl
+                            c.mssIdx := bear ? bearIdx : bullIdx
+                            c.obTop  := bear ? bearOBTop : bullOBTop
+                            c.obBot  := bear ? bearOBBot : bullOBBot
+                            float q = bear ? bearQM : bullQM
+                            if na(c.qm) and not na(q) and (bear ? (q < c.ext and q > close) : (q > c.ext and q < close))
+                                c.qm := q
+                            c.redraw := c.detail
+                        // 回踩 LTF OB、收針確認：影線進 OB、收盤收回 OB 外
+                        if c.mss and not c.retest and not na(c.obTop) and time > c.mssT
+                            bool rt = bear ? (high >= c.obBot and high <= c.obTop and close < c.obBot) : (low <= c.obTop and low >= c.obBot and close > c.obTop)
+                            if rt
+                                c.retest := true
+                                rtJust   := true
+
+                    // 4) 進場訊號（再掃之後狀態可能變了，重新判斷能不能進）
+                    canEnter := c.state == 1 or (entryTim == T_AGG and (bear ? close < c.rH : close > c.rL))
+                    if canEnter and not c.done
+                        bool beyond = bear ? close < c.cisdLvl : close > c.cisdLvl
+                        bool t1 = eC1 and cisdNew and beyond
+                        bool t4 = eOB and rtJust
+                        bool a2 = eC2 and cisdOK and na(c.ix2)
+                        bool a3 = eIF and not na(c.ifTop) and na(c.ix3)
+                        bool a5 = eQM and not na(c.qm) and na(c.ix5)
+                        bool a6 = eBB and c.bbAct and na(c.ix6)
+                        bool a7 = eFB and cisdOK and not na(c.legX) and (na(c.ix7) or c.ix7 >= 0)
+                        bool ok = true
+                        if (t1 or t4 or a2 or a3 or a5 or a6 or (a7 and na(c.ix7))) and not c.confirmed
+                            ok := f_aggOK(c)
+                        if ok
+                            // ① CISD 收盤直接進
+                            if t1
+                                string why = f_gate(c, close, true)
+                                if why == ""
+                                    f_enter(c, close, bar_index, time, 1)
+                                    newAct := true
+                                    if alEntry
+                                        alert(f_entryAlert(c), alert.freq_once_per_bar)
+                                else
+                                    c.note := f_kName(1) + " " + why
+                            // ④ MSS → 回踩 LTF OB 收針確認
+                            if t4 and not c.entered
+                                float oldSL = c.sl
+                                if aplSL == "LTF OB 外"
+                                    float obSL = bear ? c.obTop + slBuf * syminfo.mintick : c.obBot - slBuf * syminfo.mintick
+                                    if bear ? (obSL < c.sl and obSL > close) : (obSL > c.sl and obSL < close)
+                                        c.sl := obSL
+                                string why = f_gate(c, close, true)
+                                if why == ""
+                                    f_enter(c, close, bar_index, time, 4)
+                                    newAct := true
+                                    if alEntry
+                                        alert(f_entryAlert(c), alert.freq_once_per_bar)
+                                else
+                                    c.sl   := oldSL
+                                    c.note := f_kName(4) + " " + why
+                            // 掛單：② 回踩 CISD、③ IFVG、⑤ QM、⑥ BB、⑦ FIB
+                            if not c.entered
+                                if a2 and f_tryLv(c, 2, c.cisdLvl)
+                                    newAct := true
+                                if a3 and f_tryLv(c, 3, bear ? c.ifBot : c.ifTop)
+                                    newAct := true
+                                if a5 and f_tryLv(c, 5, c.qm)
+                                    newAct := true
+                                if a6 and f_tryLv(c, 6, bear ? c.bbBot : c.bbTop)
+                                    newAct := true
+                                if a7
+                                    float fp = bear ? c.legX + fibLvl * (c.ext - c.legX) : c.legX - fibLvl * (c.legX - c.ext)
+                                    bool first7 = na(c.ix7)
+                                    f_setLv(c, 7, fp, first7 ? bar_index : c.ix7)
+                                    if first7
+                                        newAct := true
+                                        if alLimit
+                                            alert(f_limitAlert(c, 7, fp) + "\n（FIB 掛單價會跟著新的極值移動）", alert.freq_once_per_bar)
+                            if newAct
+                                c.redraw := c.detail
+            // 剛進場 / 掛單的不是最新訊號（激進）→ 變成最新
+            if newAct
+                bool isLatest = false
+                if not na(lastCRT)
+                    isLatest := lastCRT.id == c.id
+                if not isLatest
+                    f_retire(c, lastCRT)
+                    lastCRT := c
+                    f_detailDraw(c)
+            if c.redraw and c.detail
+                c.redraw := false
+                f_clear(c)
+                f_detailDraw(c)
+        f_refresh(c)
+        if c.done
+            crts.remove(i)
+
+// ───────────────────────────── 新的掃蕩：C2 掃過 C1 高（低）點 ─────────────────────────────
+var int madeBearT = na
+var int madeBullT = na
+if tfOK and not na(kH) and not na(curT) and not na(kT)
+    if high > kH and (na(madeBearT) or madeBearT != curT)
+        madeBearT := curT
+        bool dup = false
+        for o in crts
+            if not o.done and not o.entered and o.dir < 0 and kH > o.rL and kH <= o.ext + (o.rH - o.rL) * 0.05
+                dup := true
+        if not dup
+            idSeq += 1
+            CRT c = CRT.new(id = idSeq, dir = -1, rH = kH, rL = kL, mid = (kH + kL) / 2, entry = close, t1 = kT, t2 = curT, sweepT = curT, c1Idx = c1HIdx, brIdx = bar_index)
+            f_newExt(c)
+            if barDone and close > kH
+                c.tbs := true
+            crts.push(c)
+    if low < kL and (na(madeBullT) or madeBullT != curT)
+        madeBullT := curT
+        bool dup = false
+        for o in crts
+            if not o.done and not o.entered and o.dir > 0 and kL < o.rH and kL >= o.ext - (o.rH - o.rL) * 0.05
+                dup := true
+        if not dup
+            idSeq += 1
+            CRT c = CRT.new(id = idSeq, dir = 1, rH = kH, rL = kL, mid = (kH + kL) / 2, entry = close, t1 = kT, t2 = curT, sweepT = curT, c1Idx = c1LIdx, brIdx = bar_index)
+            f_newExt(c)
+            if barDone and close < kL
+                c.tbs := true
+            crts.push(c)
+
+// ───────────────────────────── Killzone / 開盤線 / PDH PDL ─────────────────────────────
+bgcolor(showKZ and kzAsia ? color.new(color.blue, 93) : showKZ and kzLon ? color.new(color.purple, 93) : showKZ and kzNYAM ? color.new(color.orange, 93) : showKZ and kzNYPM ? color.new(color.teal, 94) : na, title = "Killzone")
+
+t830 = time(timeframe.period, "0830-0831:1234567", NY)
+t930 = time(timeframe.period, "0930-0931:1234567", NY)
+if showOpen and chartSec <= 1800
+    if not na(t830) and na(t830[1])
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 55), style = line.style_dotted)
+    if not na(t930) and na(t930[1])
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(#e8a21b, 45), style = line.style_dashed)
+
+plot(showPD and not dayChg ? pdh : na, "PDH", color.new(color.silver, 45), 1, plot.style_linebr)
+plot(showPD and not dayChg ? pdl : na, "PDL", color.new(color.silver, 45), 1, plot.style_linebr)
+var label pdhLb = na
+var label pdlLb = na
+if showPD and barstate.islast
+    label.delete(pdhLb)
+    label.delete(pdlLb)
+    pdhLb := label.new(bar_index + 2, pdh, "PDH", style = label.style_label_left, color = color(na), textcolor = color.new(color.silver, 20), size = size.small)
+    pdlLb := label.new(bar_index + 2, pdl, "PDL", style = label.style_label_left, color = color(na), textcolor = color.new(color.silver, 20), size = size.small)
+
+// ───────────────────────────── 面板 ─────────────────────────────
+tPos = tblPos == "右上" ? position.top_right : tblPos == "右下" ? position.bottom_right : tblPos == "左上" ? position.top_left : position.bottom_left
+var table tbl = table.new(tPos, 2, 14, bgcolor = color.new(#1f121c, 8), border_color = color.new(#ff6fb0, 82), border_width = 1, frame_color = color.new(#ff6fb0, 55), frame_width = 1)
+
+f_row(int r, string k, string v, color vc) =>
+    table.cell(tbl, 0, r, k, text_color = color.new(color.white, 30), text_size = tblSz, text_halign = text.align_left)
+    table.cell(tbl, 1, r, v, text_color = vc, text_size = tblSz, text_halign = text.align_left)
+
+f_klLine(bool above) =>
+    [nm, tp, bt, bp] = f_nearKL(above)
+    string s = ""
+    if nm == ""
+        s := "—"
+    else if bp == close
+        s := "價格在 " + nm + " 裡（" + f_px(bt) + "–" + f_px(tp) + "）"
+    else
+        s := nm + " " + (tp == bt ? f_px(tp) : f_px(bt) + "–" + f_px(tp)) + "（" + (above ? "+" : "−") + str.tostring(math.abs(bp - close) / close * 100, "#.##") + "%）"
+    s
+
+if showTbl and barstate.islast
+    table.clear(tbl, 0, 0, 1, 13)
+    color okC  = #2fd0b2
+    color badC = #ff6f8e
+    color txC  = #fbe8f2
+    string trTxt = useTrend ? " · 順勢 " + trendName + (tBias > 0 ? " 多" : tBias < 0 ? " 空" : " —") : ""
+    string tfTxt = not tfOK ? "✗ 圖表要小於 CRT 時間框架（" + crtName + "）" : (recoOK ? "✓ " : "△ ") + crtName + " CRT · LTF " + reco + "\n" + timShort + " · 訊號 " + (onKinds == "" ? "（都沒勾）" : onKinds) + " · " + rrRule + trTxt
+    f_row(0, "設定", tfTxt, not tfOK or onKinds == "" ? badC : recoOK ? okC : #ffc04a)
+
+    string klTxt = "OB/FVG：" + (klTFs == "" ? "—" : klTFs) + (klOnly ? " · 只做掃到 KL 的" : "") + (klSec <= crtSec ? "\n⚠ 較高 KL 時間框架要比 " + crtName + " 高" : "")
+    f_row(1, "KL 來源", klTxt, klSec <= crtSec ? #ffc04a : txC)
+    f_row(2, "上方 KL", f_klLine(true), bearCol)
+    f_row(3, "下方 KL", f_klLine(false), bullCol)
+
+    string kzTxt = kzAsia ? "亞洲盤（A 吸籌）" : kzLon ? "倫敦盤（M 操縱）" : kzNYAM ? "紐約上午（D 派發）" : kzNYPM ? "紐約下午" : "—"
+    string c1Txt = na(kH) ? "—" : "H " + str.tostring(kH, format.mintick) + " / L " + str.tostring(kL, format.mintick)
+    f_row(4, "C1 / 時段", c1Txt + " · " + kzTxt, txC)
+
+    // C2 狀態：這根高時間 K 上正在掃的
+    string liveTxt = "—"
+    color  liveC   = txC
+    if tfOK and not na(kH) and not na(runH)
+        liveTxt := (runH > kH and close >= kH) ? "在 CRH 上方（收在外 = 突破）" : (runL < kL and close <= kL) ? "在 CRL 下方（收在外 = 突破）" : "在 C1 區間內，尚未掃"
+        int nWait = 0
+        for o in crts
+            if not o.done and not o.entered and o.state == 2
+                nWait += 1
+            if not o.done and not o.entered and o.state == 0 and o.sweepT == curT
+                bool ob = o.dir < 0
+                if ob ? close < o.rH : close > o.rL
+                    liveTxt := (ob ? "已掃 CRH（" : "已掃 CRL（") + (o.tbs ? "TBS" : "TWS") + "）→ 潛在" + (ob ? "空方" : "多方") + "\nCISD " + f_px(o.cisdLvl) + (o.cbHit ? (o.cbGap ? " 已帶缺口破 ✓" : " 已破、缺口 ✗") : " 未破")
+                    liveC   := ob ? bearCol : bullCol
+        if nWait > 0
+            liveTxt += "\nM3：" + str.tostring(nWait) + " 個收在區間外，等收回"
+    f_row(5, "C2 狀態", liveTxt, liveC)
+
+    string lastTxt = "—"
+    string aTxt    = "—"
+    color  lastC   = txC
+    if not na(lastCRT)
+        lastTxt := (lastCRT.dir < 0 ? "▼ 空 " : "▲ 多 ") + "M" + str.tostring(lastCRT.model) + (lastCRT.sess != "" ? " " + lastCRT.sess : "") + " · " + (lastCRT.tbs ? "TBS" : "TWS") + " · " + str.format_time(lastCRT.t2, "MM/dd HH:mm", dispTZ) + "\nKL：" + (lastCRT.kl ? lastCRT.klName : "無") + "\n" + f_status(lastCRT)
+        lastC   := lastCRT.dir < 0 ? bearCol : bullCol
+        aTxt    := "掃✓ KL" + (lastCRT.kl ? "✓" : "✗") + " CRT✓ MSS" + (lastCRT.mss ? "✓" : "✗") + " 回踩" + (lastCRT.retest ? "✓" : "✗") + " → " + str.tostring(f_score(lastCRT)) + "/5" + (lastCRT.smt == 1 ? " ⚡SMT" : "")
+    f_row(6, "最新 CRT", lastTxt, lastC)
+    f_row(7, "A+ 檢查", aTxt, not na(lastCRT) and f_score(lastCRT) == 5 ? okC : txC)
+
+    string riskTxt = "—"
+    string riskKey = "部位"
+    if not na(lastCRT)
+        if not lastCRT.done
+            bool  ent  = lastCRT.entered
+            float px   = f_planPx(lastCRT)
+            float sl   = lastCRT.sl
+            float dist = math.abs(px - sl)
+            riskKey := ent ? "部位（已進場）" : f_hasLv(lastCRT) ? "部位（掛單）" : "部位（預估）"
+            if dist > 0
+                float distPct = dist / px * 100
+                float posAmt  = acct * riskPct / 100 / (distPct / 100)
+                riskTxt := "停損距離 " + str.tostring(distPct, "#.##") + "% → 下單金額 " + str.tostring(posAmt, "#,###")
+    f_row(8, riskKey, riskTxt, txC)
+
+    string dayTxt = "進場 " + str.tostring(day.get(0), "#") + (maxDaily > 0 ? "/" + str.tostring(maxDaily) : "") + " 筆 · 連續停損 " + str.tostring(day.get(1), "#") + " · " + f_sgn(day.get(2)) + "R" + (dayBlock != "" ? "\n⛔ " + dayBlock : "")
+    f_row(9, "今日", dayTxt, dayBlock != "" ? badC : txC)
+
+    if showStat
+        float nS = stats.get(10)
+        float nR = stats.get(0)
+        string kTxt = ""
+        for k = 1 to 8
+            if kCnt.get(k) > 0
+                kTxt += (kTxt == "" ? "" : " ") + f_kMark(k) + str.tostring(kCnt.get(k), "#")
+        string flowTxt = nS > 0 ? "setup " + str.tostring(nS, "#") + " → 進場 " + str.tostring(nR, "#") + (kTxt != "" ? "（" + kTxt + "）" : "") + "\n被過濾 " + str.tostring(stats.get(12), "#") + " · 沒觸發 / 失效 " + str.tostring(stats.get(11), "#") : "尚無 setup"
+        f_row(10, "訊號流", flowTxt, txC)
+        string stTxt = nR > 0 ? "TP1 " + f_pct(stats.get(1), nR) + " · TP2 " + f_pct(stats.get(2), nR) + " · TP3 " + f_pct(stats.get(3), nR) + " · TP4 " + f_pct(stats.get(13), nR) + "\n先停損 " + f_pct(stats.get(4), nR) + " · 過 TP1 後保本 / 移動停損出場 " + f_pct(stats.get(16), nR) + (holdMax > 0 ? " · 逾時 " + f_pct(stats.get(5), nR) : "") : "尚無已結算的進場"
+        f_row(11, "進場結果", stTxt, txC)
+        float evM = nR > 0 ? stats.get(15) / nR : na
+        float ev1 = nR > 0 ? stats.get(6) / nR : na
+        float ev2 = nR > 0 ? stats.get(7) / nR : na
+        float ev3 = nR > 0 ? stats.get(8) / nR : na
+        float ev4 = nR > 0 ? stats.get(14) / nR : na
+        string evTxt = nR > 0 ? "分批" + (beTP1 ? " + 保本 " : " ") + f_sgn(evM) + "R/筆（合計 " + f_sgn(stats.get(15)) + "R）\n只用一個目標：TP1 " + f_sgn(ev1) + " · TP2 " + f_sgn(ev2) + " · TP3 " + f_sgn(ev3) + " · TP4 " + f_sgn(ev4) : "—"
+        f_row(12, "期望值", evTxt, nR > 0 ? (evM > 0 ? okC : badC) : txC)
+        f_row(13, "註", "掛單同根成交又碰 SL 算虧損；同根碰 SL 與 TP 算 SL；移到保本後從下一根 K 開始算；未含點差 / 滑價", color.new(color.white, 45))
