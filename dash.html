@@ -194,7 +194,8 @@ const stCls = s => s === "持倉中" ? "st hold" : s === "掛單中" ? "st lim" 
 
 function entryCell(sym, c) {
   if (c.entry) return `${px(sym, c.entry.price)} <span class="muted">${esc(c.entry.name)}</span>`;
-  if (c.levels.length) return c.levels.map(l => `${px(sym, l.price)} <span class="muted">${esc(l.name)}</span>`).join("<br>");
+  if (c.levels.length) return c.levels.map(l => `${px(sym, l.price)} <span class="muted">${esc(l.name)}</span>`).join("<br>")
+    + (c.others.length ? `<br><span class="muted">遠（不用掛）：${othersTxt(sym, c)}</span>` : "");
   return '<span class="muted">—</span>';
 }
 function tpCell(sym, c, i) {
@@ -212,6 +213,7 @@ function slNote(sym, c) {
   return esc((c.slTag ? `原始 SL ${px(sym, c.sl)} = ` : "SL = ") + (c.slWhy || "—") + (moved ? "；" + moved : ""));
 }
 const voidedTxt = (sym, c) => c.voided.map(l => `${esc(l.name.slice(0, 1))} ${px(sym, l.price)}`).join(" · ");
+const othersTxt = (sym, c) => c.others.map(l => `${esc(l.name.slice(0, 1))} ${px(sym, l.price)}`).join(" · ");
 let tickDir = {}, chartLast = 0, liveBar = {}, liveT = 0;
 
 function renderCards() {
@@ -235,6 +237,8 @@ function renderCards() {
         body += c.levels.map(l => `<div class="row"><span>掛單 ${px(sym, l.price)}</span><span class="muted">${esc(l.name)}</span></div>`).join("");
         body += `<div class="row"><span>SL ${px(sym, c.sl)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
         body += `<div class="slwhy">${slNote(sym, c)}</div>`;
+        if (c.others.length) body += `<div class="slwhy">比較遠（不用掛，近的會先成交）：${othersTxt(sym, c)}</div>`;
+        body += `<div class="slwhy" title="${esc(c.cancelIf.join("\n"))}">沒成交前會取消：${esc(c.cancelBrief)}</div>`;
       } else {
         body += `<div class="row"><span class="muted">區間 ${px(sym, c.rL)} – ${px(sym, c.rH)}</span><span class="muted">${esc(c.kl || "")}</span></div>`;
       }
@@ -257,12 +261,13 @@ function renderActive() {
   const rows = [];
   for (const [sym, v] of Object.entries(S.symbols))
     for (const c of v.crts || [])
-      rows.push(`<tr><td>${esc(sym)}</td><td>${dirTag(c.dir)}</td><td class="${stCls(c.status)}">${esc(c.status)}</td><td>${fmtT(c.t1)}</td>
+      rows.push(`<tr><td>${esc(sym)}</td><td>${dirTag(c.dir)}</td><td class="${stCls(c.status)}" title="${esc(c.cancelIf.join("\n"))}">${esc(c.status)}<br><span class="muted">${esc(c.tag)}</span></td><td>${fmtT(c.t1)}</td>
         <td>${px(sym, c.rH)} / ${px(sym, c.rL)}</td><td>${esc(c.kl || "—")}</td><td>M${c.model}${c.sess ? " · " + esc(c.sess) : ""}${c.tbs ? " · TBS" : ""}</td>
         <td>${entryCell(sym, c)}</td>
         <td title="${slNote(sym, c)}">${px(sym, c.slNow ?? c.sl)}${c.slTag ? ` <span class="tag mv">${esc(c.slTag)}</span><br><span class="muted">原 ${px(sym, c.sl)}</span>` : ""}</td>
         ${[0,1,2,3].map(i => `<td>${tpCell(sym, c, i)}</td>`).join("")}
-        <td class="muted">${[esc(c.poor), esc(c.note), c.voided.length ? "進場後作廢：" + voidedTxt(sym, c) : ""].filter(Boolean).join(" · ")}</td></tr>`);
+        <td class="muted" style="white-space:normal;min-width:180px">${[c.cancelBrief ? "沒成交前會取消：" + esc(c.cancelBrief) : "", esc(c.poor), esc(c.note),
+          c.voided.length ? "進場後作廢：" + voidedTxt(sym, c) : ""].filter(Boolean).join("<br>")}</td></tr>`);
   $("active").innerHTML = rows.join("") || '<tr><td colspan="14" class="muted">目前沒有</td></tr>';
 }
 

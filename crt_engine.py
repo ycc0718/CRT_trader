@@ -29,6 +29,7 @@ TF_NAME = {"15m": "15M", "1H": "1H", "4H": "4H", "1D": "D"}
 
 K_NAME = {1: "① CISD 收盤", 2: "② 回踩 CISD", 3: "③ 回踩 IFVG", 4: "④ 回踩 LTF OB",
           5: "⑤ QM 左肩", 6: "⑥ 回測 BB", 7: "⑦ FIB", 8: "⑧ C2 收盤"}
+LIMIT_K = (2, 3, 5, 6, 7)       # 限價掛單類的進場訊號
 
 
 @dataclass
@@ -200,6 +201,8 @@ class CRT:
     done: bool = False
     result: str = ""
     xT: int | None = None       # 結束那根 LTF K 的開盤時間（日報用）
+    actLv: float | None = None  # 已經通知出去、要使用者掛的那一張（最近的價位）
+    actK: int = 0
 
     @property
     def key(self) -> str:
@@ -706,8 +709,9 @@ class Engine:
         return self.sym.replace("-SWAP", ".P").replace("-", "")
 
     def tagId(self, c: CRT) -> str:
+        """這個 CRT 的編號（掛單 / 改單 / 取消 / 進場卡片都帶同一個，才對得起來）。"""
         d = datetime.fromtimestamp(c.t2 / 1000, tz=timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
-        return f"#{self.disp().replace('.', '')}{self.crtName}{d:%m%d%H}"
+        return f"#{self.disp().replace('.', '')}{self.crtName}{d:%m%d%H}{'空' if c.dir < 0 else '多'}"
 
     def card(self, c: CRT, px, sig: int, mode: str) -> str:
         """Discord 訊息卡片（進場 / 掛單）。第一行是標題。"""
@@ -762,12 +766,83 @@ class Engine:
         return head + "\n" + "\n".join(L)
 
     def entryText(self, c: CRT) -> str:
-        others = [f"{self.kName(k)} {self.px(v)}" for k, v in c.lv.items() if v is not None and k != c.eKind]
-        return (self.card(c, c.ePx, c.eKind, "entry") + f"\n\n📋 {self.mgmtTxt()}"
-                + (f"\n❗ 其他掛單請取消：{' · '.join(others)}" if others else ""))
+        s = self.card(c, c.ePx, c.eKind, "entry") + f"\n\n📋 {self.mgmtTxt()}"
+        if self.orderVoided(c):
+            s += f"\n❗ 原本通知的掛單 {self.px(c.actLv)}（{self.kName(c.actK)}）請刪掉：已經用 {self.kName(c.eKind)} 進場"
+        return s
 
-    def limitText(self, c: CRT, k: int, lv) -> str:
-        return self.card(c, lv, k, "limit") + ("\n（FIB 掛單價會跟著新的極值移動）" if k == 7 else "")
+    def orderVoided(self, c: CRT) -> bool:
+        """進場了，但不是用通知出去的那張掛單成交（例如 ① / ④ 市價進場）→ 那張要刪。"""
+        return c.entered and c.actLv is not None and not (c.eKind in LIMIT_K and c.eLv is not None and abs(c.eLv - c.actLv) < 1e-12)
+
+    def pendingLv(self, c: CRT) -> list[tuple[float, int]]:
+        """還在等價格過來的掛單價位，近 → 遠（價格已經過了的，下一根開盤會直接成交，不算）。"""
+        bear, close = c.dir < 0, self.b().c
+        out = [(v, k) for k, v in c.lv.items()
+               if v is not None and c.ix[k] is not None and c.ix[k] >= 0 and ((close < v) if bear else (close > v))]
+        out.sort(key=lambda x: x[0] if bear else -x[0])
+        return out
+
+    def cancelConds(self, c: CRT) -> list[str]:
+        """沒成交前，什麼情況這張掛單會取消（給卡片和儀表板）。"""
+        bear, p = c.dir < 0, self.p
+        out = [f"價格先到 {'CRL' if bear else 'CRH'} {self.px(c.rL if bear else c.rH)}（區間另一邊）→ CRT 結束",
+               f"價格{'漲' if bear else '跌'}過掃點 {self.px(c.ext)}（= SL）→ 停損移到新掃點，等新的訊號"]
+        if p.use_m3:
+            out.append(f"{self.crtName} 收盤在 {'CRH' if bear else 'CRL'} {self.px(c.rH if bear else c.rL)} 外面 → 先取消，"
+                       f"{p.m3_max} 根內收回區間再重新判斷（M3）")
+        else:
+            out.append(f"{self.crtName} 收盤在 {'CRH' if bear else 'CRL'} {self.px(c.rH if bear else c.rL)} 外面 → CRT 結束")
+        if c.confirmed and c.state == 1 and getattr(self, "curT", None) is not None:
+            dl = self.curT + self.H.period * max(1, p.c3_bars - c.age)
+            d = datetime.fromtimestamp(dl / 1000, tz=timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+            out.append(f"{d:%m/%d %H:%M} 前沒成交（逾時）→ CRT 結束")
+        out.append("出現新的 CRT 訊號 → 被取代")
+        return out
+
+    def cancelBrief(self, c: CRT) -> str:
+        """取消條件的一行短版（儀表板卡片用）。"""
+        bear, p = c.dir < 0, self.p
+        s = [f"到 {self.px(c.rL if bear else c.rH)}", f"{'漲' if bear else '跌'}過 {self.px(c.ext)}",
+             f"{self.crtName} 收在 {self.px(c.rH if bear else c.rL)} 外"]
+        if c.confirmed and c.state == 1 and getattr(self, "curT", None) is not None:
+            dl = self.curT + self.H.period * max(1, p.c3_bars - c.age)
+            s.append(f"{datetime.fromtimestamp(dl / 1000, tz=timezone.utc).astimezone(ZoneInfo('Asia/Taipei')):%H:%M} 逾時")
+        return " · ".join(s)
+
+    def limitText(self, c: CRT, k: int, lv, others=(), prev=None) -> str:
+        lines = self.card(c, lv, k, "limit").split("\n")
+        if prev is not None:
+            lines[0] = lines[0].replace("CRT 掛單", "CRT 改掛單").replace("🆕", "🔁", 1)
+            at = next((j for j, ln in enumerate(lines) if ln.startswith("💰")), 0) + 1
+            lines.insert(at, f"🔁 原掛單 {self.px(prev)} → 改到 {self.px(lv)}（{self.kName(k)} 比較近，會先碰到）· SL 不變")
+        s = "\n".join(lines)
+        if others:
+            s += "\n📎 同一個 CRT 比較遠的價位：" + " · ".join(f"{self.kName(kk)} {self.px(v)}" for v, kk in others) \
+                 + "（近的會先成交，只要掛這一張）"
+        if k == 7:
+            s += "\n（FIB 掛單價會跟著新的極值移動）"
+        return s + "\n\n⛔ 沒成交前遇到這些就取消（會另外通知）：\n" + "\n".join("· " + x for x in self.cancelConds(c))
+
+    def syncOrder(self, c: CRT):
+        """只通知最近的那一張（價格一定先碰到近的）；出現更近的新價位（或原本那張不見了）就通知改單。"""
+        if c.done or c.entered:
+            return
+        pend = self.pendingLv(c)
+        if not pend:
+            return
+        lv, k = pend[0]
+        bear = c.dir < 0
+        if c.actLv is not None:
+            still = any(abs(v - c.actLv) < 1e-12 for v, _ in pend)
+            nearer = (lv < c.actLv) if bear else (lv > c.actLv)
+            if still and not nearer:
+                return
+        prev = c.actLv
+        c.actLv, c.actK = lv, k
+        a1, a2, a3, a4, t1 = self.calcR(c, lv)
+        self.emit("limit", c, self.limitText(c, k, lv, pend[1:], prev), sig=k, price=lv, sl=c.sl, kl=c.klName, prev=prev,
+                  tp=[t1, c.rL if bear else c.rH, c.tp3, c.tp4], r=[a1, a2, a3, a4])
 
     def limitGroupText(self, evs: list) -> str:
         lines = evs[0].text.split("\n")
@@ -835,14 +910,16 @@ class Engine:
             self.cancelPending(c, c.result)
 
     def cancelPending(self, c: CRT, why: str):
-        """有掛單但沒成交就要作廢時，通知去取消（手動掛在交易所的單）。"""
-        lv = [(k, v) for k, v in c.lv.items() if v is not None]
-        if not lv:
+        """通知出去的那張掛單沒成交就作廢時，通知去 MT5 刪單，並說明這個 CRT 之後還會不會有新的單。"""
+        if c.actLv is None or c.entered:
             return
         bear = c.dir < 0
-        items = " · ".join(f"{self.kName(k)} {self.px(v)}" for k, v in lv)
-        self.emit("cancel", c, f"{self.head(c)}{' 空方' if bear else ' 多方'} CRT 掛單取消\n{items}\n原因：{why}",
-                  levels=[v for _, v in lv])
+        nxt = ("這個 CRT 結束了，不會再用到" if c.done else
+               "同一個 CRT 還在：之後有新的進場訊號會再通知掛單 / 進場（編號一樣）")
+        self.emit("cancel", c, f"🚫 {self.disp()} | {self.crtName} CRT 取消掛單 {self.px(c.actLv)}（{'空' if bear else '多'}）\n"
+                               f"🔍 {self.tagId(c)}\n原本：{self.kName(c.actK)} {self.px(c.actLv)} · SL {self.px(c.sl)}\n"
+                               f"原因：{why}\n接下來：{nxt}", levels=[c.actLv])
+        c.actLv, c.actK = None, 0
 
     def skipWhy(self, c: CRT, why: str):
         c.skipTxt = "跳過：" + why
@@ -855,11 +932,7 @@ class Engine:
         self.setLv(c, k, lv if ok else None, self.i if ok else -1)
         if not ok:
             c.note = f"{self.kName(k)} {why}"
-        elif (self.b().c < lv) if c.dir < 0 else (self.b().c > lv):
-            a1, a2, a3, a4, t1 = self.calcR(c, lv)
-            self.emit("limit", c, self.limitText(c, k, lv), sig=k, price=lv, sl=c.sl, kl=c.klName,
-                      tp=[t1, c.rL if c.dir < 0 else c.rH, c.tp3, c.tp4], r=[a1, a2, a3, a4])
-        return ok
+        return ok          # 通知在這根 K 最後由 syncOrder 統一發（只發最近的那張）
 
     def resetTrig(self, c: CRT):
         c.cbHit, c.cbN, c.cbGap, c.cbOKIdx = False, 0, False, None
@@ -1351,7 +1424,8 @@ class Engine:
                             if why:
                                 cr.note = f"{self.kName(bk)} {why}"
                                 if bk == 7:
-                                    self.emit("cancel", cr, f"{self.head(cr)} CRT 掛單取消\n{self.kName(7)} {self.px(best)}\n原因：{why}", levels=[best])
+                                    if cr.actK == 7:
+                                        self.cancelPending(cr, f"{self.kName(7)} {why}")
                                     self.setLv(cr, 7, None, -1)
                             else:
                                 fpx = max(o, best) if bear else min(o, best)
@@ -1473,9 +1547,8 @@ class Engine:
                                         self.setLv(cr, 7, fp, i if first7 else cr.ix[7])
                                         if first7:
                                             newAct = True
-                                            a1, a2, a3, a4, tt1 = self.calcR(cr, fp)
-                                            self.emit("limit", cr, self.limitText(cr, 7, fp), sig=7, price=fp, sl=cr.sl, kl=cr.klName,
-                                                      tp=[tt1, cr.rL if bear else cr.rH, cr.tp3, cr.tp4], r=[a1, a2, a3, a4])
+                if not cr.done and not cr.entered:
+                    self.syncOrder(cr)
                 if newAct:
                     if self.lastCRT is None or self.lastCRT.id != cr.id:
                         self.retire(cr)

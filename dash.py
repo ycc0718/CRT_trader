@@ -226,10 +226,11 @@ def _dec(tick: float) -> int:
 
 def crt_view(eng, c) -> dict:
     bear = c.dir < 0
-    lv_all = [{"k": k, "name": eng.kName(k), "price": _num(v)} for k, v in c.lv.items() if v is not None]
-    # 進場後其他掛單就作廢（一個 CRT 只進一次；引擎留著這些價位只為了寫「其他掛單請取消」）
-    lv = [] if c.entered else lv_all
-    voided = [x for x in lv_all if not (c.entered and x["k"] == c.eKind and x["price"] == c.eLv)] if c.entered else []
+    item = lambda k, v: {"k": k, "name": eng.kName(k), "price": _num(v)}
+    # 只掛最近的那一張（價格一定先碰到近的）；其他價位比較遠，不用掛。進場後通知過的那張若沒成交就作廢
+    lv = [item(c.actK, c.actLv)] if (c.actLv is not None and not c.entered) else []
+    others = [] if c.entered else [item(k, v) for v, k in eng.pendingLv(c) if c.actLv is None or abs(v - c.actLv) > 1e-12]
+    voided = [item(c.actK, c.actLv)] if eng.orderVoided(c) else []
     if c.entered:
         status = "持倉中"
     elif lv:
@@ -245,7 +246,8 @@ def crt_view(eng, c) -> dict:
         "entered": c.entered, "rH": c.rH, "rL": c.rL, "mid": c.mid, "sl": _num(c.sl), "slNow": _num(c.slNow),
         "slTag": eng.slTag(c), "slWhy": eng.slWhy(c) if c.sl is not None else "",
         "cisd": _num(c.cisdLvl), "ext": _num(c.ext), "kl": c.klName, "sess": c.sess, "tbs": c.tbs, "poor": c.poor,
-        "note": c.note, "t1": c.t1, "t2": c.t2, "levels": lv, "voided": voided,
+        "note": c.note, "t1": c.t1, "t2": c.t2, "levels": lv, "others": others, "voided": voided, "tag": eng.tagId(c),
+        "cancelIf": eng.cancelConds(c) if lv else [], "cancelBrief": eng.cancelBrief(c) if lv else "",
         "entry": {"kind": c.eKind, "name": eng.kName(c.eKind), "price": c.ePx, "t": c.eT} if c.entered else None,
         "tps": [_num(c.t1Px), c.rL if bear else c.rH, _num(c.tp3), _num(c.tp4)],
         "tpNames": ["區間 50%", "對側", c.tp3Name, c.tp4Name],
