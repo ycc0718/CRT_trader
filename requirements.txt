@@ -1,3 +1,4 @@
 requests>=2.31
 tzdata
 MetaTrader5; sys_platform == "win32"
+telethon

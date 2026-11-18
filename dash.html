@@ -84,6 +84,7 @@
   <span class="pill" id="pScan">上次掃描 —</span>
   <span class="pill" id="pNext">—</span>
   <span class="pill" id="pDiscord">Discord —</span>
+  <span class="pill" id="pYuki" style="cursor:pointer">Yuki —</span>
   <button id="btnScan" title="不等 K 棒收盤，馬上重跑一次">立即掃描</button>
   <button id="btnSet">⚙ 通知設定</button>
 </header>
@@ -328,6 +329,14 @@ function renderHeader() {
   $("pScan").textContent = S.lastScan ? `上次掃描 ${fmtT(S.lastScan)}（${S.scanSec}s）` : "掃描中…";
   $("pDiscord").textContent = c.discord ? `Discord 推播中 · 本次送 ${S.lastSent ?? 0} 則` : "Discord 未設定（只顯示）";
   $("pDiscord").className = "pill" + (c.discord ? "" : " warn");
+  const y = S.yuki || {};
+  if (!y.enabled) { $("pYuki").textContent = "Yuki 未設定"; $("pYuki").className = "pill warn"; $("pYuki").title = y.msg || ""; }
+  else {
+    const sm = y.summary || {};
+    $("pYuki").textContent = `Yuki ${y.total ?? 0} 則 · 訊號 ${sm.signals ?? "—"} · 同一張 ${sm.same ?? "—"}`;
+    $("pYuki").className = "pill" + (y.error ? " bad" : "");
+    $("pYuki").title = (y.error ? "錯誤：" + y.error + "\n" : "") + `頻道：${y.msg}\n最後抓取：${fmtT(y.last)}\n對照檔：${y.report || "還沒產生"}\n點一下：馬上重抓、重新整理`;
+  }
   const al = [];
   if (S.cfgError) al.push(S.cfgError);
   if (S.scanError) al.push("掃描失敗：" + S.scanError);
@@ -561,6 +570,7 @@ $("tMt5").onclick = async () => {
   $("testMsg").textContent = r.ok ? "✅ " + r.msg : "❌ " + r.error;
 };
 
+$("pYuki").onclick = async () => { $("pYuki").textContent = "Yuki 重抓中…"; await post("/api/yuki/refresh"); };
 $("fSym").onchange = renderEvents; $("fKind").onchange = renderEvents;
 $("btnScan").onclick = async () => { $("btnScan").disabled = true; await post("/api/scan"); setTimeout(() => { $("btnScan").disabled = false; poll(); }, 4000); };
 initChart();

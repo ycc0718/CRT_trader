@@ -363,6 +363,7 @@ class Engine:
         self.day = [0.0, 0.0, 0.0]
         self.crts: list[CRT] = []
         self.trades: list[CRT] = []     # 有進場的 CRT（結束後 crts 會刪掉，這裡留著給日報）
+        self.history: list[CRT] = []    # 每一個出現過的 CRT（含沒進場、被過濾的；跟 Yuki 訊號對照用）
         self.sessions =[Sess("AS.", p.s_as, True), Sess("TKO.", p.s_tko, True), Sess("LD.", p.s_ld, True),
                          Sess("NY.8", p.s_ny8, True), Sess("NY.9", p.s_ny9, True),
                          Sess("亞洲盤", True, False), Sess("倫敦盤", True, False), Sess("開盤前", p.use_pre, False)]
@@ -1567,6 +1568,7 @@ class Engine:
                     if c > kH:
                         cr.tbs = True
                     self.crts.append(cr)
+                    self.history.append(cr)
             if l < kL and self.madeBullT != self.curT:
                 self.madeBullT = self.curT
                 dup = any(not x.done and not x.entered and x.dir > 0 and x.ext - (x.rH - x.rL) * 0.05 <= kL < x.rH for x in self.crts)
@@ -1577,6 +1579,7 @@ class Engine:
                     if c < kL:
                         cr.tbs = True
                     self.crts.append(cr)
+                    self.history.append(cr)
 
     def confirmText(self, c: CRT) -> str:
         bear = c.dir < 0

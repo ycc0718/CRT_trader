@@ -392,6 +392,43 @@ def loop() -> None:
         WAKE.wait(max(0.3, min(1.0, (nxt - time.time() * 1000) / 1000)))     # 報價每秒更新
 
 
+# ───────────── Yuki 的 Telegram 訊號：自動收集 → 整理 → 跟我們對照 ─────────────
+YUKI: dict = {"enabled": False, "msg": "還沒設定"}
+YUKI_WAKE = threading.Event()
+
+
+def yuki_loop() -> None:
+    """設定好 Telegram（python tg_collect.py --login）後：每 5 分鐘抓新訊息；有新的 / 被編輯的就重新整理對照檔。"""
+    import tg_collect
+    import yuki_report
+    while True:
+        if not tg_collect.configured() or not tg_collect.SESSION.with_suffix(".session").exists():
+            with LOCK:
+                YUKI.clear()
+                YUKI.update(enabled=False, msg="還沒設定：雙擊 CRT_trader 裡的 tg_login.bat 登入 Telegram、選頻道")
+            YUKI_WAKE.wait(60)
+            YUKI_WAKE.clear()
+            continue
+        try:
+            r = tg_collect.poll()
+            upd = {"enabled": True, "msg": os.environ.get("TG_CHAT_NAME", ""), "last": int(time.time() * 1000),
+                   "total": r["total"], "error": None}
+            if r["new"] or r["edited"] or not (tg_collect.DIR / "yuki_vs_ours.md").exists() or YUKI.get("force"):
+                path = yuki_report.build(compare_ours=True)
+                summ = json.loads((tg_collect.DIR / "summary.json").read_text(encoding="utf-8"))
+                upd.update(report=str(path), built=int(time.time() * 1000), summary=summ)
+                log.info("Yuki：新 %d、編輯 %d → 已重新整理 %s", r["new"], r["edited"], path)
+            with LOCK:
+                YUKI.update(upd)
+                YUKI.pop("force", None)
+        except Exception as e:
+            with LOCK:
+                YUKI.update(error=f"{type(e).__name__}: {e}")
+            log.warning("Yuki 收集失敗：%s", e)
+        YUKI_WAKE.wait(300)
+        YUKI_WAKE.clear()
+
+
 # ───────────── HTTP ─────────────
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -416,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(204, b"", "image/x-icon")
         elif u.path == "/api/state":
             with LOCK:
-                body = json.dumps(SNAP, ensure_ascii=False, default=str)
+                body = json.dumps(dict(SNAP, yuki=YUKI), ensure_ascii=False, default=str)
             self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")
         elif u.path == "/api/live":
             with LOCK:
@@ -459,6 +496,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "JSON 格式錯誤"}, 400)
         if path == "/api/scan":
             WAKE.set()
+            self._json({"ok": True})
+        elif path == "/api/yuki/refresh":
+            with LOCK:
+                YUKI["force"] = True
+            YUKI_WAKE.set()
             self._json({"ok": True})
         elif path == "/api/symbols":
             names = [str(x).strip() for x in body.get("symbols", []) if str(x).strip()]
@@ -545,6 +587,7 @@ def main() -> None:
         print(f"{a.port} 埠被占用（{e}），先關掉占用它的程式（例如舊的逆勢攤平儀表板）再開")
         sys.exit(1)
     threading.Thread(target=loop, daemon=True, name="scanner").start()
+    threading.Thread(target=yuki_loop, daemon=True, name="yuki").start()
     print(f"CRT 訊號儀表板 http://{a.host}:{a.port}  設定 {a.config} + {SETTINGS}"
           f"  Discord {'已設定' if hook_set() else '未設定（只顯示，不推播）'}  只讀 MT5，不會下單")
     srv.serve_forever()

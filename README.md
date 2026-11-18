@@ -20,6 +20,12 @@ venv\Scripts\python dash.py          # http://127.0.0.1:8011
 - **⚙ 通知設定**：要通知哪些事件、Discord Webhook、測試頻道 / 測試 MT5
 - 看每個商品進行中的 CRT、K 線圖上的進場 / SL / TP 線、訊號紀錄（點開是完整卡片）、回放統計、MT5 帳戶的手動持倉
 
+## 跟 Yuki 的 Telegram 訊號對照
+
+雙擊 `tg_login.bat`（第一次：Telegram api_id / api_hash、手機驗證碼、選頻道）。之後儀表板每 5 分鐘自動抓新訊息，
+整理成 `~/crt-dash-data/yuki/yuki_vs_ours.md`（跟我們的訊號逐筆對照）、`signals.csv`、`unparsed.md`。
+只用你的帳號讀取、不發訊息；資料只存在本機。手動重整：`venv\Scripts\python yuki_report.py`。
+
 ## 檔案
 
 | 檔案 | 用途 |
