@@ -189,6 +189,8 @@ class CRT:
     eT: int | None = None
     eBar: int | None = None
     tp1: bool = False
+    t1Skip: bool = False
+    eLv: float | None = None
     tp2: bool = False
     tp3Hit: bool = False
     tp4Hit: bool = False
@@ -639,6 +641,8 @@ class Engine:
         c.preConf = not c.confirmed
         c.ePx, c.eBar, c.eT = px, self.i, bar.t
         c.slNow, c.wRem, c.rz = c.sl, 1.0, 0.0
+        if c.r1 is not None and c.r1 <= 0:  # TP1 已過進場價 → 略過，部位併到 TP2，保本改在 TP2
+            c.tp1 = c.t1Skip = True
         self.day[0] += 1
         self.kCnt[kind] += 1
         self.emit("entry", c, self.entryText(c), sig=kind, price=px, sl=c.sl, tp1=c.t1Px,
@@ -671,7 +675,8 @@ class Engine:
         bear = c.dir < 0
         a1, a2, a3, a4, t1 = self.calcR(c, px)
         tp, rr = [t1, c.rL if bear else c.rH, c.tp3, c.tp4], [a1, a2, a3, a4]
-        r1 = a1 or 0.0
+        skip1 = mode == "entry" and c.t1Skip
+        r1 = (a2 if skip1 else a1) or 0.0
         grade = "🔴 低 (RR < 0.5)" if r1 < 0.5 else "🟡 中 (RR 0.5~1.0)" if r1 < 1 else "🟢 高 (RR ≥ 1.0)"
         prem = px > c.mid
         good = prem if bear else not prem
@@ -683,8 +688,20 @@ class Engine:
                  if ok and n != same]
         aggr = mode == "entry" and c.preConf or mode != "entry" and not c.confirmed
         head = f"{'⚡' if aggr else '🆕'} {self.disp()} | {self.crtName} CRT {'進場' if mode == 'entry' else '掛單'}【{'激進' if aggr else '標準'}】"
+        how = ""
+        if mode == "entry":
+            if sig in (2, 3, 5, 6, 7) and c.eLv is not None and abs(c.ePx - c.eLv) > 1e-12:
+                how = f"🧾 成交：訊號價 {self.px(c.eLv)} 出現時價格已經過了，下一根開盤 {self.px(c.ePx)} 直接成交（沒有另外發掛單通知）"
+            elif sig in (2, 3, 5, 6, 7):
+                how = f"🧾 成交：掛單 {self.px(c.ePx)} 被碰到"
+            elif sig == 1:
+                how = "🧾 成交：K 棒收盤帶缺口" + ("跌破" if bear else "漲破") + " CISD，收盤價市價進場（之前的掛單作廢）"
+            elif sig == 4:
+                how = "🧾 成交：回踩 LTF OB 後收回，收盤價市價進場（之前的掛單作廢）"
+            elif sig == 8:
+                how = "🧾 成交：C2 收盤價進場"
         L = [f"🔍 {self.tagId(c)}", "━━━━━━━━━━━━━━",
-             f"💰 {'進場價' if mode == 'entry' else '掛單價'}：{self.px(px)}",
+             f"💰 {'進場價' if mode == 'entry' else '掛單價'}：{self.px(px)}"] + ([how] if how else []) + [
              f"{'📉' if bear else '📈'} 方向：{'看空 (SHORT)' if bear else '看多 (LONG)'}",
              f"⚡ 觸發來源：{' + '.join(conf)}",
              f"📊 盈虧評級：{grade}",
@@ -698,7 +715,10 @@ class Engine:
             L.append("⚠️ 尚未收盤確認，提前進場")
         L.append("━━━━━━━━━━━━━━")
         for k in range(4):
-            L.append(f"🎯 TP{k + 1}: {self.px(tp[k])} (RR: {'—' if rr[k] is None else f'{rr[k]:.2f}'})")
+            if rr[k] is not None and rr[k] <= 0:
+                L.append(f"⏭ TP{k + 1}: {self.px(tp[k])}（已過進場價，略過）")
+            else:
+                L.append(f"🎯 TP{k + 1}: {self.px(tp[k])} (RR: {'—' if rr[k] is None else f'{rr[k]:.2f}'})")
         L += ["", f"🚫 SL: {self.px(c.sl)}"]
         return head + "\n" + "\n".join(L)
 
@@ -722,7 +742,7 @@ class Engine:
                 s += f"（{c.note}）"
             return s
         sn = c.sl if c.slNow is None else c.slNow
-        s = "✓TP4" if c.tp4Hit else "✓TP3" if c.tp3Hit else "✓TP2" if c.tp2 else "✓TP1" if c.tp1 else ""
+        s = "✓TP4" if c.tp4Hit else "✓TP3" if c.tp3Hit else "✓TP2" if c.tp2 else "✓TP1" if c.tp1 and not c.t1Skip else ""
         if c.stopped:
             s = "✗ 停損" if s == "" else s + (" → 保本出場" if sn == c.ePx else " → 停損（已移到 TP1）出場" if sn != c.sl else " → 回到停損")
         elif not c.tp4Hit and c.wRem > 0.0001:
@@ -740,19 +760,20 @@ class Engine:
         rS = ((c.ePx - sn) if bear else (sn - c.ePx)) / risk if risk > 0 else -1.0
         if not c.stopped and c.wRem > 0.0001:
             c.rz += c.wRem * mtm
-        o = [((c.r1 or 0.0) if c.tp1 else rS if c.stopped else mtm),
+        h1 = c.tp1 and not c.t1Skip
+        o = [((c.r1 or 0.0) if h1 else rS if c.stopped else mtm),
              ((c.r2 or 0.0) if c.tp2 else rS if c.stopped else mtm),
              ((c.r3 or 0.0) if c.tp3Hit else rS if c.stopped else mtm),
              ((c.r4 or 0.0) if c.tp4Hit else rS if c.stopped else mtm)]
         st = self.stats
         st[0] += 1
-        st[1] += c.tp1
+        st[1] += h1
         st[2] += c.tp2
         st[3] += c.tp3Hit
         st[13] += c.tp4Hit
-        st[4] += c.stopped and not c.tp1
-        st[5] += (not c.stopped) and not c.tp1
-        st[16] += c.stopped and c.tp1
+        st[4] += c.stopped and not h1
+        st[5] += (not c.stopped) and not h1
+        st[16] += c.stopped and h1
         st[6] += o[0]
         st[7] += o[1]
         st[8] += o[2]
@@ -794,7 +815,7 @@ class Engine:
         self.setLv(c, k, lv if ok else None, self.i if ok else -1)
         if not ok:
             c.note = f"{self.kName(k)} {why}"
-        else:
+        elif (self.b().c < lv) if c.dir < 0 else (self.b().c > lv):
             a1, a2, a3, a4, t1 = self.calcR(c, lv)
             self.emit("limit", c, self.limitText(c, k, lv), sig=k, price=lv, sl=c.sl, kl=c.klName,
                       tp=[t1, c.rL if c.dir < 0 else c.rH, c.tp3, c.tp4], r=[a1, a2, a3, a4])
@@ -875,12 +896,18 @@ class Engine:
             if self.p.be_tp1:
                 c.slNow = c.ePx
         if c.tp1 and not c.tp2 and ((bar.l <= c.rL) if bear else (bar.h >= c.rH)):
+            wq = w2 + (w1 if c.t1Skip else 0.0)
             c.tp2 = True
-            c.rz += w2 * (c.r2 or 0.0)
-            c.wRem -= w2
-            ev += (" → " if ev else "") + "✓ TP2" + (f"（停損移到 TP1 {self.px(c.t1Px)}）" if self.p.tr_tp2 else "")
-            if self.p.tr_tp2:
-                c.slNow = c.t1Px
+            c.rz += wq * (c.r2 or 0.0)
+            c.wRem -= wq
+            if c.t1Skip:
+                ev += (" → " if ev else "") + "✓ TP2" + (f"（停損移到保本 {self.px(c.ePx)}）" if self.p.be_tp1 else "")
+                if self.p.be_tp1:
+                    c.slNow = c.ePx
+            else:
+                ev += (" → " if ev else "") + "✓ TP2" + (f"（停損移到 TP1 {self.px(c.t1Px)}）" if self.p.tr_tp2 else "")
+                if self.p.tr_tp2:
+                    c.slNow = c.t1Px
         if c.tp2 and not c.tp3Hit and c.tp3 is not None and ((bar.l <= c.tp3) if bear else (bar.h >= c.tp3)):
             c.tp3Hit = True
             c.rz += w3 * (c.r3 or 0.0)
@@ -1265,7 +1292,7 @@ class Engine:
                             txt = (f"{self.head(cr)}{' 空單 ' if bear else ' 多單 '}{ev} · 累計 {sgn(cr.rz)}R"
                                    + ("" if cr.done else f" · 還剩 {round(cr.wRem * 100)}%") + f" · {self.kName(cr.eKind)}")
                             self.emit("exit", cr, txt, ev=ev, rz=cr.rz, done=cr.done,
-                                      hits=[cr.tp1, cr.tp2, cr.tp3Hit, cr.tp4Hit], stopped=cr.stopped,
+                                      hits=[cr.tp1 and not cr.t1Skip, cr.tp2, cr.tp3Hit, cr.tp4Hit], stopped=cr.stopped,
                                       be=cr.stopped and cr.slNow == cr.ePx)
                 else:
                     canEnter = cr.state == 1 or (p.aggressive and (c < cr.rH if bear else c > cr.rL))
@@ -1287,6 +1314,7 @@ class Engine:
                                     self.setLv(cr, 7, None, -1)
                             else:
                                 fpx = max(o, best) if bear else min(o, best)
+                                cr.eLv = best
                                 self.enter(cr, fpx, bk)
                                 filled = newAct = True
                                 if (h > cr.sl) if bear else (l < cr.sl):
