@@ -1,0 +1,94 @@
+﻿Yuki 訊號收集器（放在另一台電腦用）
+====================================
+
+這個資料夾做什麼
+----------------
+- 用你自己的 Telegram 帳號「唯讀」讀 Yuki 的頻道，把訊息存成 raw.json。不會在 Telegram 發任何東西。
+- CRT 主機（跑 MT5 和 CRT 儀表板 http://127.0.0.1:8011 的那台）讀同一個 raw.json，
+  自動跟我們的訊號對照，產生 yuki_vs_ours.md。
+- 這台不需要 MT5，也不需要 CRT 的其他程式，只要裝 Python。
+- 整個 tg_collector 資料夾複製過來就能用（隨身碟、網路芳鄰、或 git clone 整個 CRT_trader 都可以）。
+
+
+一、先決定 raw.json 怎麼傳到 CRT 主機（二選一）
+----------------------------------------------
+方法 1：雲端同步資料夾（推薦，兩台不在同一個地方也可以）
+  兩台電腦都登入「同一個」OneDrive（或 Google Drive / Dropbox），兩邊的同步程式都要開著。
+  在同步資料夾裡建一個資料夾，例如 CRT-Yuki。
+    這台的「輸出資料夾」         = 這台看到的路徑，例如 C:\Users\你的帳號\OneDrive\CRT-Yuki
+    CRT 主機的「Yuki 訊息資料夾」 = 主機看到的路徑，例如 C:\Users\user\OneDrive\CRT-Yuki
+
+方法 2：兩台在同一個網路，用 Windows 共用資料夾
+  在 CRT 主機建資料夾 C:\CRT-Yuki-Inbox
+  → 右鍵「內容」→「共用」→「進階共用」→ 勾「共用此資料夾」→「權限」讓這台登入用的帳號可以「變更」。
+    這台的「輸出資料夾」         = \CRT主機的電腦名稱\CRT-Yuki-Inbox
+                                   （電腦名稱在主機的「設定 → 系統 → 關於 → 裝置名稱」）
+    CRT 主機的「Yuki 訊息資料夾」 = C:\CRT-Yuki-Inbox
+  第一次連共用資料夾時，Windows 可能會問主機的帳號密碼。
+
+
+二、這台電腦（收集 Telegram）
+----------------------------
+0. 沒有 Python 的話：到 https://www.python.org/downloads/ 下載安裝。
+   安裝畫面一定要勾「Add python.exe to PATH」。
+
+1. 把整個 tg_collector 資料夾放到固定的地方，例如 C:\tg_collector
+   （之後不要再搬，開機自動收集會記住這個位置）
+
+2. 雙擊「1_安裝.bat」：建立 Python 環境、安裝 Telethon（要網路，約 1 分鐘）
+
+3. 申請 Telegram API（只要一次）
+   瀏覽器開 https://my.telegram.org → 輸入手機號碼（+8869xxxxxxxx）
+   → Telegram App 會收到驗證碼，填進網頁 → 登入後點「API development tools」
+   → App title、Short name 隨便填（例如 crt collector / crtcollector）→ Create application
+   → 記下 api_id（一串數字）和 api_hash（一串英文數字）
+
+4. 雙擊「2_登入Telegram.bat」，照視窗問的輸入：
+     api_id、api_hash
+     → 手機號碼（+8869xxxxxxxx）
+     → Telegram App 傳來的驗證碼
+     → 兩步驟驗證密碼（有設才要，沒設直接 Enter）
+     → 選要收集的頻道（輸入列表上的編號，或先打幾個字篩選）
+     → 輸出資料夾（照「一」選的方法填這台的路徑）
+   它會先抓全部歷史訊息，存成輸出資料夾裡的 raw.json。
+
+5. 雙擊「3_開始收集.bat」：每 5 分鐘抓一次新訊息，也會重抓最近 300 則看有沒有被編輯
+   （Yuki 事後補「TP2 ✅」也抓得到）。這個視窗開著才會收集，關掉就停。
+   想要開機自動收集：雙擊「4_開機自動收集.bat」（不要了就雙擊「5_取消開機自動.bat」）。
+   電腦關機的時間沒關係：下次開機會自動補抓（Telegram 會留著歷史訊息）。
+
+
+三、CRT 主機（跑 8011 的那台）
+------------------------------
+打開 http://127.0.0.1:8011 → 右上「⚙ 通知設定」→ 最下面「Yuki 訊號對照」
+→「Yuki 訊息資料夾」填「一」裡主機那邊的路徑 → 儲存。
+
+上方會出現「Yuki（另一台）N 則 · 訊號 · 同一張」。主機每分鐘看一次 raw.json，
+有新訊息就自動重新整理這幾個檔：
+  C:\Users\user\crt-dash-data\yuki\yuki_vs_ours.md   主檔：我們跟 Yuki 逐筆對照
+  C:\Users\user\crt-dash-data\yuki\signals.csv       每張 Yuki 訊號一列
+  C:\Users\user\crt-dash-data\yuki\unparsed.md       認不出來的訊息（拿來修解析規則）
+滑鼠移到「Yuki」上看詳細狀態；點一下＝馬上重新讀取。
+顯示「沒在更新」＝這台超過 20 分鐘沒抓（電腦關了？收集視窗關了？同步卡住？）。
+
+
+四、注意
+--------
+- data\tg.session 是你 Telegram 帳號的登入狀態，等於密碼：
+  不要複製給別人、不要放進同步資料夾、不要上傳。.env 裡的 api_id / api_hash 也一樣。
+- 這個程式只讀，不會在 Telegram 發任何東西。
+- 想登出：Telegram App →「設定」→「裝置」→ 找「CRT collector」→ 結束工作階段，再刪掉 data 資料夾。
+- 要換頻道或輸出資料夾：再雙擊一次「2_登入Telegram.bat」。
+- 之後更新程式：只要換掉 collector.py（.env、data、venv 不要動）。
+- 幾分鐘抓一次：在 .env 加一行 INTERVAL_MIN=5（預設 5，不建議太頻繁）。
+
+
+五、這個資料夾裡的檔案
+----------------------
+collector.py            收集程式（CRT 主機那邊用的是同一支）
+1_安裝.bat ～ 5_取消開機自動.bat
+requirements.txt        要安裝的套件（Telethon）
+.env                    設定（登入後自動產生）：TG_API_ID、TG_API_HASH、TG_CHAT、TG_CHAT_NAME、OUTPUT_DIR、INTERVAL_MIN
+data\                   Telegram 登入檔（自動產生）
+輸出資料夾\raw.json     抓到的訊息（含被編輯前的舊版本）
+輸出資料夾\status.json  最後一次抓取的時間、結果、這台的電腦名稱（CRT 主機用來判斷這台有沒有在跑）

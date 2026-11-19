@@ -172,6 +172,10 @@
       <label>Webhook：日報（留空 = 發到訊號頻道）<span id="hookRepSt" class="muted"></span><input name="hook_report" type="password" placeholder="https://discord.com/api/webhooks/…（留空 = 不改）" autocomplete="off"></label>
       <div class="row" style="justify-content:flex-start;gap:8px;align-items:center"><button type="button" id="tRep">立即發送今日日報</button><span id="repMsg" class="note"></span></div>
     </fieldset>
+    <fieldset><legend>Yuki 訊號對照（另一台電腦收集 Telegram）</legend>
+      <label>Yuki 訊息資料夾（另一台寫 raw.json 的地方；留空 = 這台自己收集）<input name="yuki_inbox" placeholder="例如 C:\Users\user\OneDrive\CRT-Yuki" style="flex:1"></label>
+      <div class="note" id="yukiSt"></div>
+    </fieldset>
     <div class="row" style="justify-content:flex-end;gap:8px"><button value="cancel">取消</button><button type="button" id="saveSet">儲存</button></div>
   </form>
 </dialog>
@@ -332,10 +336,13 @@ function renderHeader() {
   const y = S.yuki || {};
   if (!y.enabled) { $("pYuki").textContent = "Yuki 未設定"; $("pYuki").className = "pill warn"; $("pYuki").title = y.msg || ""; }
   else {
-    const sm = y.summary || {};
-    $("pYuki").textContent = `Yuki ${y.total ?? 0} 則 · 訊號 ${sm.signals ?? "—"} · 同一張 ${sm.same ?? "—"}`;
-    $("pYuki").className = "pill" + (y.error ? " bad" : "");
-    $("pYuki").title = (y.error ? "錯誤：" + y.error + "\n" : "") + `頻道：${y.msg}\n最後抓取：${fmtT(y.last)}\n對照檔：${y.report || "還沒產生"}\n點一下：馬上重抓、重新整理`;
+    const sm = y.summary || {}, remote = y.mode === "remote";
+    const stale = remote && (!y.last || Date.now() - y.last > 20 * 60 * 1000);          // 另一台 20 分鐘沒更新
+    const err = y.error || y.remoteError;
+    $("pYuki").textContent = `Yuki${remote ? "（另一台）" : ""} ${y.total ?? 0} 則 · 訊號 ${sm.signals ?? "—"} · 同一張 ${sm.same ?? "—"}` + (stale ? " · 沒在更新" : "");
+    $("pYuki").className = "pill" + (err ? " bad" : stale ? " warn" : "");
+    $("pYuki").title = (err ? "錯誤：" + err + "\n" : "") + `來源：${y.msg}\n${remote ? "另一台最後抓取" : "最後抓取"}：${fmtT(y.last)}`
+      + (remote ? `\n資料夾：${y.inbox}` : "") + `\n對照檔：${y.report || "還沒產生"}\n點一下：馬上重新讀取、重新整理`;
   }
   const al = [];
   if (S.cfgError) al.push(S.cfgError);
@@ -534,6 +541,8 @@ $("btnSet").onclick = async () => {
   $("hookSt").textContent = MY.discord ? "已設定" : "未設定";
   $("hookRepSt").textContent = MY.discord_report ? "已設定" : "未設定（發到訊號頻道）";
   $("testMsg").textContent = ""; $("repMsg").textContent = "";
+  f.yuki_inbox.value = MY.yuki_inbox || "";
+  $("yukiSt").textContent = $("pYuki").title.split("\n").slice(0, 3).join(" · ");
   $("dlg").showModal();
 };
 $("tRep").onclick = async () => {
@@ -550,6 +559,7 @@ $("saveSet").onclick = async () => {
     report: {enabled: f.r_enabled.checked, time: f.r_time.value.trim() || "06:00", skip_weekend: f.r_skip.checked}};
   if (f.hook.value.trim()) body.webhook = f.hook.value.trim();
   if (f.hook_report.value.trim()) body.webhook_report = f.hook_report.value.trim();
+  if ((f.yuki_inbox.value.trim()) !== (MY.yuki_inbox || "")) body.yuki_inbox = f.yuki_inbox.value.trim();
   const r = await post("/api/settings", body);
   if (!r.ok) { $("testMsg").textContent = r.error; return; }
   $("dlg").close(); loadSettings(); poll();

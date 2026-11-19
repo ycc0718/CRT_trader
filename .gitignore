@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 signals.csv
 replay.txt
+# 另一台的 Telegram 收集器：登入檔、輸出（別人的內容）不上傳
+tg_collector/data/
+tg_collector/output/

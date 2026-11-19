@@ -398,21 +398,33 @@ YUKI_WAKE = threading.Event()
 
 
 def yuki_loop() -> None:
-    """設定好 Telegram（python tg_collect.py --login）後：每 5 分鐘抓新訊息；有新的 / 被編輯的就重新整理對照檔。"""
+    """兩種模式：
+    遠端（.env 有 YUKI_INBOX）：另一台電腦用 tg_collector 收集，寫 raw.json 到同步 / 共用資料夾；這裡每分鐘看檔案有沒有變。
+    本機（這台 tg_login.bat 登入過）：每 5 分鐘自己抓。
+    有新的 / 被編輯的訊息就重新整理對照檔。"""
     import tg_collect
     import yuki_report
     while True:
-        if not tg_collect.configured() or not tg_collect.SESSION.with_suffix(".session").exists():
+        remote = tg_collect.inbox()
+        if not remote and not tg_collect.configured():
             with LOCK:
                 YUKI.clear()
-                YUKI.update(enabled=False, msg="還沒設定：雙擊 CRT_trader 裡的 tg_login.bat 登入 Telegram、選頻道")
+                YUKI.update(enabled=False, msg="還沒設定：另一台收集 → 通知設定填「Yuki 訊息資料夾」；這台收集 → 雙擊 tg_login.bat")
             YUKI_WAKE.wait(60)
             YUKI_WAKE.clear()
             continue
         try:
-            r = tg_collect.poll()
-            upd = {"enabled": True, "msg": os.environ.get("TG_CHAT_NAME", ""), "last": int(time.time() * 1000),
-                   "total": r["total"], "error": None}
+            if remote:
+                r = tg_collect.pull_inbox()                    # None = 檔案沒變
+                st = tg_collect.inbox_status()
+                upd = {"enabled": True, "mode": "remote", "msg": f"另一台 {st.get('host', '?')} · {st.get('chat', '')}",
+                       "last": st.get("t"), "remoteError": st.get("error"), "inbox": str(remote), "error": None,
+                       "total": r["total"] if r else len(tg_collect.load_raw())}
+                r = r or {"new": 0, "edited": 0}
+            else:
+                r = tg_collect.poll()
+                upd = {"enabled": True, "mode": "local", "msg": os.environ.get("TG_CHAT_NAME", ""), "last": int(time.time() * 1000),
+                       "total": r["total"], "error": None, "remoteError": None}
             if r["new"] or r["edited"] or not (tg_collect.DIR / "yuki_vs_ours.md").exists() or YUKI.get("force"):
                 path = yuki_report.build(compare_ours=True)
                 summ = json.loads((tg_collect.DIR / "summary.json").read_text(encoding="utf-8"))
@@ -425,7 +437,7 @@ def yuki_loop() -> None:
             with LOCK:
                 YUKI.update(error=f"{type(e).__name__}: {e}")
             log.warning("Yuki 收集失敗：%s", e)
-        YUKI_WAKE.wait(300)
+        YUKI_WAKE.wait(60 if remote else 300)                 # 遠端只是看檔案，便宜；本機要連 Telegram
         YUKI_WAKE.clear()
 
 
@@ -474,7 +486,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_cfg()
             self._json({"symbols": cfg.get("symbols", []), "notify": cfg.get("notify", []), "alerts": cfg.get("alerts", True),
                         "discord": hook_set(), "discord_report": hook_set("DISCORD_WEBHOOK_URL_REPORT"),
-                        "report": cfg["report"]})
+                        "report": cfg["report"], "yuki_inbox": str(__import__("tg_collect").inbox() or "")})
         elif u.path == "/api/daily":
             try:
                 back = max(0, min(13, int(parse_qs(u.query).get("back", ["0"])[0])))
@@ -539,6 +551,12 @@ class Handler(BaseHTTPRequestHandler):
                                             "https://ptb.discord.com/api/webhooks/", "https://canary.discord.com/api/webhooks/")):
                         return self._json({"ok": False, "error": "Webhook 網址要是 https://discord.com/api/webhooks/… 開頭"}, 400)
                     set_webhook(hook, key)
+            if "yuki_inbox" in body:
+                ib = str(body["yuki_inbox"] or "").strip().strip('"')
+                if ib and not os.path.isdir(ib):
+                    return self._json({"ok": False, "error": f"找不到資料夾：{ib}（同步資料夾有開嗎？共用資料夾連得到嗎？）"}, 400)
+                set_webhook(ib, "YUKI_INBOX")
+                YUKI_WAKE.set()
             if upd:
                 save_settings(upd)
             self._json({"ok": True, "discord": hook_set()})

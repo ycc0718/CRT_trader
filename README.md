@@ -22,7 +22,10 @@ venv\Scripts\python dash.py          # http://127.0.0.1:8011
 
 ## 跟 Yuki 的 Telegram 訊號對照
 
-雙擊 `tg_login.bat`（第一次：Telegram api_id / api_hash、手機驗證碼、選頻道）。之後儀表板每 5 分鐘自動抓新訊息，
+**在另一台電腦收集（建議）**：把 `tg_collector\` 整個資料夾複製過去，照裡面的 `操作說明.txt` 做；
+這台在儀表板「⚙ 通知設定 → Yuki 訊號對照」填那台寫進來的資料夾（雲端同步或共用資料夾）。
+
+**這台自己收集**：雙擊 `tg_login.bat`（第一次：Telegram api_id / api_hash、手機驗證碼、選頻道）。之後儀表板每 5 分鐘自動抓新訊息，
 整理成 `~/crt-dash-data/yuki/yuki_vs_ours.md`（跟我們的訊號逐筆對照）、`signals.csv`、`unparsed.md`。
 只用你的帳號讀取、不發訊息；資料只存在本機。手動重整：`venv\Scripts\python yuki_report.py`。
 
