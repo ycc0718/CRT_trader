@@ -52,7 +52,7 @@ eQM      = input.bool(true, "⑤ QM 左肩", group = GE, tooltip = "左肩高點
 eBB      = input.bool(true, "⑥ 回測 BB", group = GE, tooltip = "推上去之前那段連續陰線（多方 OB），被收盤跌破變成 BB，在 BB 下緣掛單。")
 eFB      = input.bool(false, "⑦ 斐波那契回撤", group = GE, inline = "fb")
 fibLvl   = input.float(0.618, "", options = [0.5, 0.618, 0.705, 0.786], group = GE, inline = "fb", tooltip = "CISD 被帶缺口跌破後，從掃點拉到之後的最低點，在這個回撤位置掛單（掛單價會跟著最低點移動）。")
-eCL      = input.bool(true, "⑧ C2 收盤價直接進（= Yuki 的「標準」）", group = GE, tooltip = "CRT 一確認（C2 收盤收回區間）就以 C2 收盤價進，不等 LTF。講義說沒等 LTF 結構轉變就進是新手錯誤；但 Yuki 實際發的「標準」訊號就是這樣進。2026-11 對照 30 天：Yuki 那批商品（多是加密）打開後比較好；MT5 外匯 / 黃金 / 指數反而變差，用在外匯要自己看結果。")
+eCL      = input.bool(false, "⑧ C2 收盤價直接進（= Yuki 的「標準」）", group = GE, tooltip = "CRT 一確認（C2 收盤收回區間）就以 C2 收盤價進，不等 LTF。講義說沒等 LTF 結構轉變就進是新手錯誤；但 Yuki 實際發的「標準」訊號就是這樣進。2026-11 對照 30 天：Yuki 那批商品（多是加密）打開後比較好；MT5 外匯 / 黃金 / 指數反而變差，用在外匯要自己看結果。")
 
 rrTarget = input.string("TP2", "RR 顯示 / 計算目標", options = ["TP1", "TP2", "TP3", "TP4"], group = GF)
 minRR    = input.float(0, "最小 RR（0 = 不擋）", minval = 0, step = 0.1, group = GF, tooltip = "預設 0：RR 只顯示、不擋進場（用分批出場 + 保本管理）。設大於 0 時，某一種進場訊號 RR 不夠就不用它，繼續等別種。")

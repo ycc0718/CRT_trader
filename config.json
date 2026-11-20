@@ -9,7 +9,7 @@
     "crt_tf": "1H",
     "kl_tf": "4H",
     "aggressive": false,
-    "e1": true, "e2": true, "e3": true, "e4": true, "e5": true, "e6": true, "e7": false, "e8": true, "reopen": true,
+    "e1": true, "e2": true, "e3": true, "e4": true, "e5": true, "e6": true, "e7": false, "e8": false, "reopen": true,
     "min_rr": 0,
     "kl_only": true,
     "ts_gap": true,

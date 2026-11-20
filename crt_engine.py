@@ -63,7 +63,7 @@ class Params:
     e6: bool = True
     e7: bool = False
     fib_lvl: float = 0.618
-    e8: bool = True             # ⑧ C2 收盤價直接進（= Yuki 的「標準」）
+    e8: bool = False            # ⑧ C2 收盤價直接進（= Yuki 的「標準」；MT5 外匯 / 指數 30 天是負的，2026-11-20 關掉）
     # ③ filters
     rr_target: str = "TP2"
     min_rr: float = 0.0
