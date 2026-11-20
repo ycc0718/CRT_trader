@@ -401,9 +401,11 @@ def yuki_loop() -> None:
     """兩種模式：
     遠端（.env 有 YUKI_INBOX）：另一台電腦用 tg_collector 收集，寫 raw.json 到同步 / 共用資料夾；這裡每分鐘看檔案有沒有變。
     本機（這台 tg_login.bat 登入過）：每 5 分鐘自己抓。
-    有新的 / 被編輯的訊息就重新整理對照檔。"""
+    有新的 / 被編輯的訊息就重新整理對照檔：對照要跑幾十個商品（幾分鐘），所以自動的最多 REBUILD_MIN 分鐘一次，按 pill 重抓才立刻跑。"""
     import tg_collect
     import yuki_report
+    rebuild_min = float(os.environ.get("YUKI_REBUILD_MIN") or 60)
+    dirty, built = False, 0.0
     while True:
         remote = tg_collect.inbox()
         if not remote and not tg_collect.configured():
@@ -425,17 +427,25 @@ def yuki_loop() -> None:
                 r = tg_collect.poll()
                 upd = {"enabled": True, "mode": "local", "msg": os.environ.get("TG_CHAT_NAME", ""), "last": int(time.time() * 1000),
                        "total": r["total"], "error": None, "remoteError": None}
-            if r["new"] or r["edited"] or not (tg_collect.DIR / "yuki_vs_ours.md").exists() or YUKI.get("force"):
-                path = yuki_report.build(compare_ours=True)
-                summ = json.loads((tg_collect.DIR / "summary.json").read_text(encoding="utf-8"))
-                upd.update(report=str(path), built=int(time.time() * 1000), summary=summ)
+            dirty = dirty or bool(r["new"] or r["edited"])
+            missing = not (tg_collect.DIR / "yuki_vs_ours.md").exists()
+            if missing or YUKI.get("force") or (dirty and time.time() - built >= rebuild_min * 60):
+                with LOCK:
+                    YUKI.update(upd, building=True)
+                path = yuki_report.build(compare_ours=True, log=lambda m: log.info("Yuki 對照：%s", m))
+                dirty, built = False, time.time()
+                upd.update(building=False)
                 log.info("Yuki：新 %d、編輯 %d → 已重新整理 %s", r["new"], r["edited"], path)
+            sf = tg_collect.DIR / "summary.json"
+            if sf.exists():
+                summ = json.loads(sf.read_text(encoding="utf-8"))
+                upd.update(report=str(tg_collect.DIR / "yuki_vs_ours.md"), built=summ.get("t"), summary=summ)
             with LOCK:
                 YUKI.update(upd)
                 YUKI.pop("force", None)
         except Exception as e:
             with LOCK:
-                YUKI.update(error=f"{type(e).__name__}: {e}")
+                YUKI.update(error=f"{type(e).__name__}: {e}", building=False)
             log.warning("Yuki 收集失敗：%s", e)
         YUKI_WAKE.wait(60 if remote else 300)                 # 遠端只是看檔案，便宜；本機要連 Telegram
         YUKI_WAKE.clear()

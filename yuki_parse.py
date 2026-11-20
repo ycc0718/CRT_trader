@@ -1,29 +1,29 @@
-"""Yuki 的 Telegram 訊息：分類 + 抓欄位。
+"""Yuki 的 Telegram 訊息（CRT Sniper 頻道）：分類 + 抓欄位。
 
-類型：
-  signal  有方向、也有價位（進場 / 掛單 / SL / TP）——一張 CRT 單
-  result  說打到 TP 幾、停損、保本（通常是回覆原訊號、或帶同一個 #編號）
-  other   其他（公告、圖、聊天…）
+頻道的實際樣子（2026-11 看過全部歷史後照實際格式寫）：
+  卡片   第一行「🔍#<商品><TF><mmddHH>[A]」，下一行「🆕 / ⚡ <商品> | <TF> CRT SNIPE【標準 / 激進】」，
+         💰 收盤價 / 現價 / 進場價、方向、觸發來源（激進）、評級、TBS、CISD、KL…、🎯 TP1–4（RR，打到加 ✅）、🚫 SL、⏰ 訊號時間。
+         **到 TP2 才第一次發**，之後到 TP3、TP4 各再發一次整張（不是編輯），所以停損的單不會出現在卡片裡。
+         同一個 #編號 可能是兩張不同的單（同一小時先空後多），用「編號 + 方向 + SL」分開。
+  日報   「📊 【… 每日結算 …】」：每個時間框架當天最高到 TP1–4、SL 各幾單、勝率 → 這才看得到 Yuki 的停損。
+  其他   公告、圖、盈利分享的說明文字…（盈利分享裡夾的卡片照樣當卡片收）
 
-規則照 CRT 卡片的格式寫（🔍 #編號、【激進 / 標準】、💰 進場價 / 掛單價、🎯 TP1…、🚫 SL、⚡ 觸發來源、🔑 KL…），
-看到真正的 Yuki 訊息後再補；認不出來的會整理在 unparsed.md，不會丟掉。
-訊號被事後編輯（例如補上 TP2 ✅）時，用最新的文字，舊版本留在 raw.json。
+編號的時間 = C2 那根 K 的開盤時間（台灣時間 mmddHH）；⏰ = 訊號發出的時間（台灣時間）。
+認不出來的訊息會整理在 unparsed.md，不會丟掉。
 """
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 TPE = ZoneInfo("Asia/Taipei")
 NUM = r"([0-9][0-9,]*(?:\.[0-9]+)?)"
-HIT = r"(✅|✔️|✔|☑️|☑|🎯✅|達成|到達|打到|已到|止盈|hit|HIT|Hit)"
-STOP_WORDS = {"CRT", "SHORT", "LONG", "TP", "SL", "RR", "TBS", "TWS", "CISD", "KL", "OB", "FVG", "IFVG", "BB", "MSS",
-              "QM", "FIB", "OHP", "OLP", "EQH", "EQL", "PDH", "PDL", "CRH", "CRL", "NY", "LD", "AS", "TKO", "BUY", "SELL",
-              "H1", "H4", "D1", "M1", "M2", "M3", "M4", "M5", "M15", "LTF", "HTF", "SMT", "AMD", "PO3", "EQ", "ATR", "UTC"}
-K_OF = {"①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6, "⑦": 7, "⑧": 8}
-K_WORD = [(1, r"CISD\s*收盤"), (2, r"回踩\s*CISD"), (3, r"IFVG"), (4, r"LTF\s*OB|MSS"), (5, r"QM|左肩"), (6, r"\bBB\b|回測\s*BB"),
-          (7, r"FIB|斐波|0\.6|0\.7"), (8, r"C2\s*收盤")]
+TF_MS = {"15m": 900_000, "1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000}
+FIELDS = {                       # 卡片上「名稱：值」的欄位 → 存成的 key
+    "盈虧評級": "grade", "區間評級": "body", "相對位置": "zone", "TBS": "tbs", "CISD": "cisd", "FIBO KL": "fibo_kl",
+    "FIBO": "fibo", "KL": "kl", "VP": "vp", "觸發來源": "trigger", "趨勢評估": "trend_eval",
+}
 
 
 def _num(s: str | None) -> float | None:
@@ -33,160 +33,143 @@ def _num(s: str | None) -> float | None:
         return None
 
 
-def _first(pat: str, text: str, grp: int = 1, flags=0) -> str | None:
-    m = re.search(pat, text, flags)
-    return m.group(grp).strip() if m else None
-
-
-def direction(text: str) -> int:
-    line = _first(r"方向[：:]\s*([^\n]+)", text) or ""
-    for src in (line, text):
-        best = None
-        for pat, d in ((r"看空|SHORT|Short|做空|空單|空方|賣出|\bSELL\b|\bSell\b", -1), (r"看多|LONG|Long|做多|多單|多方|買入|\bBUY\b|\bBuy\b", 1)):
-            m = re.search(pat, src)
-            if m and (best is None or m.start() < best[0]):
-                best = (m.start(), d)
-        if best:
-            return best[1]
-    return 0
+def norm_tf(tf: str | None) -> str | None:
+    if not tf:
+        return None
+    t = tf.strip().upper()
+    return {"15M": "15m", "1H": "1H", "H1": "1H", "60M": "1H", "4H": "4H", "H4": "4H", "240M": "4H", "D": "1D", "1D": "1D",
+            "D1": "1D"}.get(t)
 
 
 def parse_tag(tag: str | None, posted: int) -> dict:
-    """#XAUUSD1H111821 → 商品、時間框架、C2 那根的時間（台灣時間 mmddHH，年份用發文時間推）。"""
-    out = {"tag_sym": None, "tag_tf": None, "c2": None}
-    if not tag:
-        return out
-    m = re.match(r"([A-Za-z][A-Za-z0-9.]*?)(\d{1,2}[MmHh]|[Dd]|[Hh]\d)?(\d{6,8})(?:\D.*)?$", tag)
+    """NAS100USD1H101616 / 1000PEPEUSDTP1H091105A / ETH1H031306 / 4H031318 → 商品、TF、C2 開盤時間、是不是激進（A）。"""
+    out = {"tag_sym": None, "tag_tf": None, "c2": None, "tag_aggr": False}
+    m = re.match(r"^(.*?)(\d{1,2}[HhMm]|[Dd])(\d{6})(A?)$", tag or "")
     if not m:
-        out["tag_sym"] = re.sub(r"[^A-Za-z0-9.].*$", "", tag) or None
         return out
-    out["tag_sym"], tf, ds = m.group(1), m.group(2), m.group(3)
-    if tf:
-        out["tag_tf"] = tf.upper().replace("M", "m") if tf[-1] in "mM" else tf.upper()
+    out["tag_sym"] = m.group(1) or None
+    out["tag_tf"] = norm_tf(m.group(2))
+    out["tag_aggr"] = m.group(4) == "A"
+    ds = m.group(3)
     try:
         mo, dd, hh = int(ds[0:2]), int(ds[2:4]), int(ds[4:6])
         post = datetime.fromtimestamp(posted / 1000, TPE)
-        y = post.year - (1 if mo > post.month + 1 else 0)
+        y = post.year - (1 if mo > post.month + 1 else 0)          # 跨年：12 月的單 1 月才發
         out["c2"] = int(datetime(y, mo, dd, hh, tzinfo=TPE).timestamp() * 1000)
     except ValueError:
         pass
     return out
 
 
-def symbol(text: str, tag_sym: str | None) -> str | None:
-    if tag_sym and tag_sym.upper() not in STOP_WORDS:
-        return tag_sym
-    head = "\n".join(text.splitlines()[:3])
-    for tok in re.findall(r"\b([A-Z][A-Z0-9]{2,11}(?:\.[A-Z]+)?)\b", head):
-        if tok not in STOP_WORDS and not re.fullmatch(r"M\d+|H\d+|TP\d|RR\d*", tok):
-            return tok
-    return None
+def _field(text: str, name: str) -> str | None:
+    # 「🔑KL: …」「🐢TBS : …」「📊 盈虧評級： …」：名稱前面可以有表情符號，冒號全形半形都可以
+    m = re.search(r"(?m)^[^\w\n]*" + re.escape(name) + r"\s*[：:]\s*(.+?)\s*$", text)
+    return m.group(1) if m else None
 
 
-def timeframe(text: str, tag_tf: str | None) -> str | None:
-    m = re.search(r"\b(\d{1,2})\s*([mMhH])\b\s*(?:CRT|級別|時框)?", text)
-    if m and ("CRT" in text[m.start(): m.end() + 6] or not tag_tf):
-        return f"{m.group(1)}{'m' if m.group(2) in 'mM' else 'H'}"
-    if tag_tf:
-        return tag_tf
-    m = re.search(r"(\d{1,2})\s*(分|小時)", text)
-    return f"{m.group(1)}{'m' if m.group(2) == '分' else 'H'}" if m else None
-
-
-def hits(text: str) -> list[int]:
-    """哪些 TP 打到了：同一行有 TPn 和 ✅ / 達成…；或「TP2 ✅」這種結果訊息。"""
-    got = set()
-    for ln in text.splitlines():
-        if re.search(HIT, ln):
-            for n in re.findall(r"TP\s*([1-4])", ln, re.I):
-                got.add(int(n))
-            m = re.search(r"TP\s*1\s*[-~～到]\s*TP?\s*([1-4])", ln, re.I)
-            if m:
-                got.update(range(1, int(m.group(1)) + 1))
-    return sorted(got)
-
-
-def outcome_words(text: str) -> str:
-    """結果字眼（只認像結果的說法，不看「到 TP1 保本」這種規則說明）。"""
-    for pat, w in ((r"全部(止盈|出場|平倉)|TP4\s*" + HIT, "全部出場"),
-                   (r"保本(出場|離場|平倉)|已保本|保本\s*(✅|✔)", "保本"),
-                   (r"(止損|停損)(出場|離場|平倉|了)|打(到)?(止|停)損|已(止|停)損|SL\s*(✅|hit|觸發|被打)|❌", "停損")):
-        if re.search(pat, text):
-            return w
-    return ""
-
-
-def entry_kind(trigger: str | None) -> int:
-    if not trigger:
-        return 0
-    first = trigger.split("+")[0]
-    for ch, k in K_OF.items():
-        if ch in first:
-            return k
-    for k, pat in K_WORD:
-        if re.search(pat, first, re.I):
-            return k
-    return 0
-
-
-def parse_msg(r: dict) -> dict:
-    text = r.get("text") or ""
-    tag = _first(r"#([A-Za-z][A-Za-z0-9_.]*\d[^\s]*)", text) or _first(r"#(\S+)", text)
-    tg = parse_tag(tag, r["date"])
-    d = direction(text)
-    em = re.search(r"(進場價|掛單價|入場價|進場|入場|掛單|Entry|ENTRY)[^\d\n]{0,8}" + NUM, text)
-    entry = _num(em.group(2)) if em else None
-    sl = _num(_first(r"(?:\bSL\b|止損|停損|Stop)[^\d\n%]{0,8}" + NUM + r"(?![0-9.,]*\s*%)", text, 1))
-    tps: dict[int, float | None] = {}
-    for n, v in re.findall(r"TP\s*([1-4])\s*[:：=]\s*" + NUM + r"(?![0-9.,]*\s*%)", text, re.I):   # 「TP1: 價格」，不抓「TP1 25%」
-        tps.setdefault(int(n), _num(v))
-    rr = {int(n): _num(v) for n, v in re.findall(r"TP\s*([1-4])[^\n]*?RR[：:\s]*" + NUM, text, re.I)}
-    trig = _first(r"(?:觸發來源|觸發|Trigger)[：:]\s*([^\n]+)", text)
-    p = {
-        "id": r["id"], "posted": r["date"], "edited": r.get("edit"), "reply_to": r.get("reply_to"), "tag": tag, **tg,
-        "symbol": symbol(text, tg["tag_sym"]), "tf": timeframe(text, tg["tag_tf"]), "dir": d,
-        "mode": "激進" if "激進" in text or re.search(r"aggressive", text, re.I) else "標準" if "標準" in text else "",
-        "order": ("掛單" if "掛單" in em.group(1) else "進場") if em else "",
-        "entry": entry, "sl": sl, "tp": [tps.get(i) for i in (1, 2, 3, 4)], "rr": [rr.get(i) for i in (1, 2, 3, 4)],
-        "trigger": trig, "kind": entry_kind(trig), "kl": _first(r"\bKL[：:]\s*([^\n]+)", text),
-        "model": _first(r"Model[：:]?\s*M?(\d)", text) or _first(r"\bM([1-4])\b", text),
-        "session": _first(r"時段\s*([A-Za-z.0-9]+)", text), "grade": _first(r"盈虧評級[：:]\s*([^\n]+)", text),
-        "zone": _first(r"相對位置[：:]\s*([^\n]+)", text), "tbs": _first(r"TBS[：:]\s*([^\n]+)", text),
-        "cisd": _first(r"CISD[：:]\s*([^\n]+)", text), "depth": _num(_first(r"掃蕩深度[：:]\s*(-?" + NUM[1:], text)),
-        "hits": hits(text), "end": outcome_words(text), "text": text, "versions": len(r.get("versions", [])),
+def parse_card(text: str, posted: int) -> dict | None:
+    """一則訊息裡的 CRT 卡片；沒有卡片回傳 None。"""
+    m = re.search(r"🔍\s*#(\S+)", text)
+    if not m:
+        return None
+    body = text[m.start():]
+    tag = re.sub(r"[^A-Za-z0-9]+$", "", m.group(1))
+    tg = parse_tag(tag, posted)
+    hd = re.search(r"(?m)^\s*([^\w\s|]+)\s*([^\s|]+)\s*\|\s*(\S+)\s*CRT\s*SNIPE(?:\s*【(激進|標準)】)?", body)
+    px = re.search(r"💰\s*(收盤價|現價|進場價)\s*[：:]\s*" + NUM, body)
+    dl = _field(body, "方向") or ""
+    d = -1 if re.search(r"看空|SHORT", dl) else 1 if re.search(r"看多|LONG", dl) else 0
+    if not d and hd:                                  # 早期的簡短卡片沒有「方向」：看標題的 📉 / 📈
+        d = -1 if "📉" in hd.group(1) else 1 if "📈" in hd.group(1) else 0
+    tr = re.search(r"/\s*\S*\s*(順勢|逆勢)", dl)
+    aggr = bool((hd and ("⚡" in hd.group(1) or hd.group(4) == "激進")) or tg["tag_aggr"])
+    tps, rr, adj, hit = [None] * 4, [None] * 4, [None] * 4, [False] * 4
+    for n, v, r, rest in re.findall(r"(?m)^\s*🎯\s*TP\s*([1-4])\s*[:：]\s*" + NUM + r"\s*(?:\(\s*RR\s*[:：]\s*" + NUM + r"\s*\))?(.*)$", body):
+        k = int(n) - 1
+        tps[k], rr[k] = _num(v), _num(r)
+        hit[k] = "✅" in rest
+        a = re.search(r"⚙️?\s*" + NUM + r"\s*→\s*1\s*:\s*" + NUM, rest)     # 「⚙️1.72 → 1:1」= 原本 RR 1.72，改成 1R
+        if a:
+            adj[k] = (_num(a.group(1)), _num(a.group(2)))
+    sl = _num((re.search(r"🚫\s*SL\s*[:：]\s*" + NUM, body) or [None, None])[1])
+    clk = re.search(r"⏰\s*(\d{4}-\d\d-\d\d \d\d:\d\d(?::\d\d)?)", body)
+    sig_t = None
+    if clk:
+        s = clk.group(1) + (":00" if clk.group(1).count(":") == 1 else "")
+        sig_t = int(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TPE).timestamp() * 1000)
+    tf = norm_tf(hd.group(3)) if hd else None
+    tf = tf or tg["tag_tf"]
+    if sig_t is None and not aggr and tg["c2"] and tf:
+        sig_t = tg["c2"] + TF_MS[tf]                 # 標準：C2 收盤那一刻
+    out = {
+        "tag": tag, **tg, "symbol": (hd.group(2) if hd else None) or tg["tag_sym"], "tf": tf, "dir": d,
+        "mode": "激進" if aggr else "標準", "trend": tr.group(1) if tr else "",
+        "px_kind": px.group(1) if px else "", "entry": _num(px.group(2)) if px else None, "sl": sl,
+        "tp": tps, "rr": rr, "tp_adj": adj, "hit": hit, "hit_max": max([i + 1 for i in range(4) if hit[i]] or [0]),
+        "early": "尚未收盤確認" in body, "sig_t": sig_t, "resent": "補發" in body,
     }
-    has_px = entry is not None or sl is not None or any(v is not None for v in p["tp"])
-    if d and has_px:
-        p["type"] = "signal"
-    elif p["hits"] or p["end"]:
-        p["type"] = "result"
-    else:
-        p["type"] = "other"
-    return p
+    for name, key in FIELDS.items():
+        v = _field(body, name)
+        if name == "FIBO" and v is None:
+            continue
+        out[key] = v
+    if out.get("fibo") is None and out.get("fibo_kl"):
+        out["fibo"] = out["fibo_kl"]
+    if not out["dir"] and tps[0] is not None and tps[1] is not None and tps[0] != tps[1]:
+        out["dir"] = -1 if tps[1] < tps[0] else 1     # TP1 = 區間 50%、TP2 = 對側，順序就是方向
+    return out if out["dir"] and tps[1] is not None else None
+
+
+def parse_daily(text: str, posted: int) -> dict | None:
+    """每日結算：{date, market, tf: {1H: {tp1..tp4, sl, win}}}。半夜 00:0x 發的是前一天。"""
+    if "每日結算" not in text:
+        return None
+    mk = re.search(r"【([^】]*?)\s*-\s*每日結算", text)
+    market = mk.group(1).strip() if mk else ""
+    market = "加密" if "加密" in market or "Crypto" in market else "外匯黃金" if ("外匯" in market or "CFD" in market) else "全部"
+    day = datetime.fromtimestamp(posted / 1000, TPE) - timedelta(hours=6)
+    out = {"date": day.strftime("%Y-%m-%d"), "market": market, "posted": posted, "tf": {}}
+    for sec in re.split(r"🎯\s*", text)[1:]:
+        tfm = re.match(r"(\S+)\s*CRT", sec)
+        if not tfm or not norm_tf(tfm.group(1)):
+            continue
+        cnt = {}
+        for k, pat in (("tp1", r"TP1"), ("tp2", r"TP2"), ("tp3", r"TP3"), ("tp4", r"TP4"), ("sl", r"SL")):
+            v = re.search(pat + r"\s*[：:]\s*(\d+)", sec)
+            cnt[k] = int(v.group(1)) if v else 0
+        w = re.search(r"勝率\s*[：:]\s*" + NUM, sec)
+        cnt["win"] = _num(w.group(1)) if w else None
+        out["tf"][norm_tf(tfm.group(1))] = cnt
+    # 「盈利參考 - 分批平倉」的 25/25/25/25（舊格式「【25% 25% 25% 25%】」）：當天所有單合計幾 R
+    r = re.search(r"[\[【]\s*25%?[\s/]+25%?[\s/]+25%?[\s/]+25%?\s*[\]】]\s*[：:]\s*([+-]?\s*[0-9.]+)\s*R", text)
+    out["r25"] = float(r.group(1).replace(" ", "")) if r else None
+    return out if out["tf"] else None
 
 
 def parse_all(raw: dict) -> dict:
-    """全部訊息 → signals（結果已經併進去）、results、other。"""
-    msgs = sorted((parse_msg(r) for r in raw.values()), key=lambda x: x["id"])
-    sig = [m for m in msgs if m["type"] == "signal"]
-    by_id = {m["id"]: m for m in sig}
-    by_tag = {}
-    for m in sig:
-        if m["tag"]:
-            by_tag.setdefault(m["tag"], m)
-    res = [m for m in msgs if m["type"] == "result"]
-    for s in sig:
-        s["result_ids"], s["hit_max"] = [], max(s["hits"]) if s["hits"] else 0
-    for r in res:
-        tgt = by_id.get(r["reply_to"]) or (by_tag.get(r["tag"]) if r["tag"] else None)
-        r["linked"] = tgt["id"] if tgt else None
-        if tgt:
-            tgt["result_ids"].append(r["id"])
-            tgt["hit_max"] = max([tgt["hit_max"]] + r["hits"])
-            tgt["end"] = tgt["end"] or r["end"]
-    return {"signals": sig, "results": res, "other": [m for m in msgs if m["type"] == "other"]}
+    """全部訊息 → signals（同一張的多則合併：第一次出現、最高 TP）、daily（每日結算）、other（其他）。"""
+    sigs: dict[tuple, dict] = {}
+    daily, other = [], []
+    for r in sorted(raw.values(), key=lambda x: x["id"]):
+        text = r.get("text") or ""
+        cd = parse_card(text, r["date"])
+        if cd:
+            key = (cd["tag"], cd["dir"], cd["sl"] if cd["sl"] is not None else cd["entry"])
+            s = sigs.get(key)
+            if s is None:
+                sigs[key] = s = dict(cd, id=r["id"], posted=r["date"], last=r["date"], posts=0, text=text)
+            s["posts"] += 1
+            s["last"] = r["date"]
+            if cd["hit_max"] >= s["hit_max"]:
+                s.update(hit=cd["hit"], hit_max=cd["hit_max"], text=text)
+            continue
+        dy = parse_daily(text, r["date"])
+        if dy:
+            daily.append(dict(dy, id=r["id"]))
+            continue
+        other.append({"id": r["id"], "posted": r["date"], "reply_to": r.get("reply_to"), "text": text, "media": r.get("media")})
+    return {"signals": sorted(sigs.values(), key=lambda s: s["posted"]), "daily": daily, "other": other}
 
 
 def fmt_t(ms: int | None) -> str:
     return "—" if not ms else datetime.fromtimestamp(ms / 1000, TPE).strftime("%m/%d %H:%M")
-

@@ -72,8 +72,9 @@ def resolve_symbols(names: list[str], cfg: dict | None = None) -> dict[str, floa
     return out
 
 
-def run_symbol(sym: str, cfg: dict, tick: float | None = None) -> Engine:
-    s = src(cfg)
+def run_symbol(sym: str, cfg: dict, tick: float | None = None, source=None) -> Engine:
+    """source：要用別的行情來源時傳進來（介面同 okx / mt5src：candles、tick_size），例如 Yuki 對照用的快取行情。"""
+    s = source or src(cfg)
     tick = tick if tick is not None else s.tick_size(sym)
     p = build_params(cfg, tick)
     ltf = s.candles(sym, cfg.get("ltf", "5m"), int(cfg.get("ltf_bars", 1200)))

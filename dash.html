@@ -339,10 +339,12 @@ function renderHeader() {
     const sm = y.summary || {}, remote = y.mode === "remote";
     const stale = remote && (!y.last || Date.now() - y.last > 20 * 60 * 1000);          // 另一台 20 分鐘沒更新
     const err = y.error || y.remoteError;
-    $("pYuki").textContent = `Yuki${remote ? "（另一台）" : ""} ${y.total ?? 0} 則 · 訊號 ${sm.signals ?? "—"} · 同一張 ${sm.same ?? "—"}` + (stale ? " · 沒在更新" : "");
+    $("pYuki").textContent = `Yuki${remote ? "（另一台）" : ""} 近 ${sm.days ?? "—"} 天 ${sm.signals ?? "—"} 張 · 我們同 CRT ${sm.same_crt ?? "—"} · 也進場 ${sm.same ?? "—"}`
+      + (y.building ? " · 對照中…" : "") + (stale ? " · 沒在更新" : "");
     $("pYuki").className = "pill" + (err ? " bad" : stale ? " warn" : "");
     $("pYuki").title = (err ? "錯誤：" + err + "\n" : "") + `來源：${y.msg}\n${remote ? "另一台最後抓取" : "最後抓取"}：${fmtT(y.last)}`
-      + (remote ? `\n資料夾：${y.inbox}` : "") + `\n對照檔：${y.report || "還沒產生"}\n點一下：馬上重新讀取、重新整理`;
+      + (remote ? `\n資料夾：${y.inbox}` : "") + `\n訊息 ${y.total ?? 0} 則 · Yuki 全部 ${sm.signals_all ?? "—"} 張單\n對照檔：${y.report || "還沒產生"}`
+      + `（${fmtT(y.built)} 整理）\n點一下：馬上重新讀取、重新整理（要幾分鐘）`;
   }
   const al = [];
   if (S.cfgError) al.push(S.cfgError);
