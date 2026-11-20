@@ -47,6 +47,7 @@ class Params:
     crt_tf: str = "1H"
     use_m3: bool = True
     m3_max: int = 3
+    reopen: bool = True         # 同方向重開 CRT：每根新掃蕩都開新的（False = 前一個同方向的還沒進場就不開）
     c3_bars: int = 2
     sess_only: bool = False
     min_rng: float = 0.5
@@ -62,7 +63,7 @@ class Params:
     e6: bool = True
     e7: bool = False
     fib_lvl: float = 0.618
-    e8: bool = False
+    e8: bool = True             # ⑧ C2 收盤價直接進（= Yuki 的「標準」）
     # ③ filters
     rr_target: str = "TP2"
     min_rr: float = 0.0
@@ -812,18 +813,23 @@ class Engine:
         return " · ".join(s)
 
     def limitText(self, c: CRT, k: int, lv, others=(), prev=None) -> str:
-        lines = self.card(c, lv, k, "limit").split("\n")
-        if prev is not None:
-            lines[0] = lines[0].replace("CRT 掛單", "CRT 改掛單").replace("🆕", "🔁", 1)
-            at = next((j for j, ln in enumerate(lines) if ln.startswith("💰")), 0) + 1
-            lines.insert(at, f"🔁 原掛單 {self.px(prev)} → 改到 {self.px(lv)}（{self.kName(k)} 比較近，會先碰到）· SL 不變")
-        s = "\n".join(lines)
-        if others:
-            s += "\n📎 同一個 CRT 比較遠的價位：" + " · ".join(f"{self.kName(kk)} {self.px(v)}" for v, kk in others) \
-                 + "（近的會先成交，只要掛這一張）"
+        """掛單通知（簡短版，2026-11-20 使用者要求）：掛哪裡、SL、TP、什麼情況取消，各一行。
+        完整評級（TBS / CISD / KL…）留在進場卡片；比較遠的價位不列（近的一定先成交）。"""
+        bear = c.dir < 0
+        a1, a2, a3, a4, t1 = self.calcR(c, lv)
+        tp, rr = [t1, c.rL if bear else c.rH, c.tp3, c.tp4], [a1, a2, a3, a4]
+        tps = " · ".join(f"TP{i + 1} {self.px(tp[i])}" + ("（略過）" if rr[i] is not None and rr[i] <= 0 else
+                                                          f"（{rr[i]:.1f}R）" if rr[i] is not None else "")
+                         for i in range(4) if tp[i] is not None)
+        head = (f"{'🔁' if prev is not None else '📌'} {self.disp()} | {self.crtName} {'改掛單' if prev is not None else '掛單'}"
+                f" {'空' if bear else '多'}【{'標準' if c.confirmed else '激進'}】")
+        L = [f"🔍 {self.tagId(c)}",
+             f"💰 {self.px(lv)}（{self.kName(k)}）· 🚫 SL {self.px(c.sl)}" + (f" · 原本掛 {self.px(prev)}" if prev is not None else ""),
+             f"🎯 {tps}",
+             f"⛔ 取消：{self.cancelBrief(c)} · 新 CRT 取代"]
         if k == 7:
-            s += "\n（FIB 掛單價會跟著新的極值移動）"
-        return s + "\n\n⛔ 沒成交前遇到這些就取消（會另外通知）：\n" + "\n".join("· " + x for x in self.cancelConds(c))
+            L.append("（FIB 掛單價會跟著新的極值移動）")
+        return head + "\n" + "\n".join(L)
 
     def syncOrder(self, c: CRT):
         """只通知最近的那一張（價格一定先碰到近的）；出現更近的新價位（或原本那張不見了）就通知改單。"""
@@ -847,8 +853,9 @@ class Engine:
 
     def limitGroupText(self, evs: list) -> str:
         lines = evs[0].text.split("\n")
-        items = " / ".join(f"{self.kName(e.data['sig'])} {self.px(e.data['price'])}" for e in evs)
-        return "\n".join(f"💰 掛單（先碰到的先成交，其他取消）：{items}" if ln.startswith("💰") else ln for ln in lines)
+        items = " / ".join(f"{self.px(e.data['price'])}（{self.kName(e.data['sig'])}）" for e in evs)
+        return "\n".join(f"💰 {items}（先碰到的成交）· 🚫 SL {self.px(evs[0].data.get('sl'))}" if ln.startswith("💰") else ln
+                         for ln in lines)
 
     def resText(self, c: CRT) -> str:
         if not c.entered:
@@ -1560,7 +1567,8 @@ class Engine:
         if kH is not None:
             if h > kH and self.madeBearT != self.curT:
                 self.madeBearT = self.curT
-                dup = any(not x.done and not x.entered and x.dir < 0 and x.rL < kH <= x.ext + (x.rH - x.rL) * 0.05 for x in self.crts)
+                dup = not p.reopen and any(not x.done and not x.entered and x.dir < 0 and x.rL < kH <= x.ext + (x.rH - x.rL) * 0.05
+                                           for x in self.crts)
                 if not dup:
                     self.idSeq += 1
                     cr = CRT(self.idSeq, -1, kH, kL, (kH + kL) / 2, c, kT, self.curT, self.curT, self.c1HIdx, i)
@@ -1571,7 +1579,8 @@ class Engine:
                     self.history.append(cr)
             if l < kL and self.madeBullT != self.curT:
                 self.madeBullT = self.curT
-                dup = any(not x.done and not x.entered and x.dir > 0 and x.ext - (x.rH - x.rL) * 0.05 <= kL < x.rH for x in self.crts)
+                dup = not p.reopen and any(not x.done and not x.entered and x.dir > 0 and x.ext - (x.rH - x.rL) * 0.05 <= kL < x.rH
+                                           for x in self.crts)
                 if not dup:
                     self.idSeq += 1
                     cr = CRT(self.idSeq, 1, kH, kL, (kH + kL) / 2, c, kT, self.curT, self.curT, self.c1LIdx, i)

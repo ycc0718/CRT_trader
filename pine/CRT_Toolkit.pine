@@ -36,6 +36,7 @@ crtTF    = input.timeframe("60", "CRT 時間框架", options = ["15", "60", "240
 useM3    = input.bool(true, "Model 3 多根操縱", group = G1, tooltip = "講義第 6 章：掃蕩可能要好幾根 K 才完成。C2 之後又再掃更高（做空）或收在區間外，只要之後收回 C1 區間，就延續同一個 CRT，停損移到新的掃點。關掉的話，收在區間外就放棄。")
 m3Max    = input.int(3, "　收在區間外最多等幾根收回", minval = 1, maxval = 10, group = G1)
 showM2   = input.bool(true, "標示 Model 2：C2 自己掃完並打到另一端", group = G1)
+reopen   = input.bool(true, "同方向重開 CRT（每根新掃蕩都開新的）", group = G1, tooltip = "每根新的 K 掃過前一根的高（低）點，就開一個新的 CRT（跟 Yuki 的訊號一樣，2026-11 對照：關掉時漏掉最多 Yuki 的單）。關掉 = 前一個同方向 CRT 還沒進場、新的掃點又在它的區間內，就當成同一段掃蕩、不開新的。")
 c3Bars   = input.int(2, "等進場最多幾根 K（C3 有效根數）", minval = 1, maxval = 10, group = G1, tooltip = "CRT 確認後，幾根 CRT 時間框架的 K 內要出現進場訊號，超過就放棄這個 CRT。進場之後抱多久，看「出場管理」的持倉上限。")
 sessOnly = input.bool(false, "只做時段 CRT（C1 = AS./TKO./LD./NY.8/NY.9）", group = G1, tooltip = "只在 CRT 時間框架 = 1H 時有效。")
 minRng   = input.float(0.5, "區間太小 < ATR ×", minval = 0, step = 0.1, group = G1, inline = "rng")
@@ -51,7 +52,7 @@ eQM      = input.bool(true, "⑤ QM 左肩", group = GE, tooltip = "左肩高點
 eBB      = input.bool(true, "⑥ 回測 BB", group = GE, tooltip = "推上去之前那段連續陰線（多方 OB），被收盤跌破變成 BB，在 BB 下緣掛單。")
 eFB      = input.bool(false, "⑦ 斐波那契回撤", group = GE, inline = "fb")
 fibLvl   = input.float(0.618, "", options = [0.5, 0.618, 0.705, 0.786], group = GE, inline = "fb", tooltip = "CISD 被帶缺口跌破後，從掃點拉到之後的最低點，在這個回撤位置掛單（掛單價會跟著最低點移動）。")
-eCL      = input.bool(false, "⑧ C2 收盤價（不等 LTF，只做對照）", group = GE, tooltip = "CRT 一確認就以 C2 收盤價進。講義說沒等 LTF 結構轉變就進是新手錯誤，預設關閉。")
+eCL      = input.bool(true, "⑧ C2 收盤價直接進（= Yuki 的「標準」）", group = GE, tooltip = "CRT 一確認（C2 收盤收回區間）就以 C2 收盤價進，不等 LTF。講義說沒等 LTF 結構轉變就進是新手錯誤；但 Yuki 實際發的「標準」訊號就是這樣進。2026-11 對照 30 天：Yuki 那批商品（多是加密）打開後比較好；MT5 外匯 / 黃金 / 指數反而變差，用在外匯要自己看結果。")
 
 rrTarget = input.string("TP2", "RR 顯示 / 計算目標", options = ["TP1", "TP2", "TP3", "TP4"], group = GF)
 minRR    = input.float(0, "最小 RR（0 = 不擋）", minval = 0, step = 0.1, group = GF, tooltip = "預設 0：RR 只顯示、不擋進場（用分批出場 + 保本管理）。設大於 0 時，某一種進場訊號 RR 不夠就不用它，繼續等別種。")
@@ -2121,9 +2122,10 @@ if tfOK and not na(kH) and not na(curT) and not na(kT)
     if high > kH and (na(madeBearT) or madeBearT != curT)
         madeBearT := curT
         bool dup = false
-        for o in crts
-            if not o.done and not o.entered and o.dir < 0 and kH > o.rL and kH <= o.ext + (o.rH - o.rL) * 0.05
-                dup := true
+        if not reopen
+            for o in crts
+                if not o.done and not o.entered and o.dir < 0 and kH > o.rL and kH <= o.ext + (o.rH - o.rL) * 0.05
+                    dup := true
         if not dup
             idSeq += 1
             CRT c = CRT.new(id = idSeq, dir = -1, rH = kH, rL = kL, mid = (kH + kL) / 2, entry = close, t1 = kT, t2 = curT, sweepT = curT, c1Idx = c1HIdx, brIdx = bar_index)
@@ -2134,9 +2136,10 @@ if tfOK and not na(kH) and not na(curT) and not na(kT)
     if low < kL and (na(madeBullT) or madeBullT != curT)
         madeBullT := curT
         bool dup = false
-        for o in crts
-            if not o.done and not o.entered and o.dir > 0 and kL < o.rH and kL >= o.ext - (o.rH - o.rL) * 0.05
-                dup := true
+        if not reopen
+            for o in crts
+                if not o.done and not o.entered and o.dir > 0 and kL < o.rH and kL >= o.ext - (o.rH - o.rL) * 0.05
+                    dup := true
         if not dup
             idSeq += 1
             CRT c = CRT.new(id = idSeq, dir = 1, rH = kH, rL = kL, mid = (kH + kL) / 2, entry = close, t1 = kT, t2 = curT, sweepT = curT, c1Idx = c1LIdx, brIdx = bar_index)
