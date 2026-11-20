@@ -44,6 +44,7 @@ maxRng   = input.float(3.0, "太大 > ATR ×", minval = 0, step = 0.1, group = G
 hidePoor = input.bool(false, "區間偏小 / 偏大就不做", group = G1, tooltip = "預設關閉：區間大小只提醒、不擋進場。")
 
 entryTim = input.string(T_CON, "進場時機", options = [T_AGG, T_CON], group = GE, tooltip = "講義第 8 章。\n激進：C2 還沒收盤、掃完回到區間，就去 LTF 找進場。點位好，但 C2 可能最後沒收回 → 停損。\n保守：等 C2 收盤確認收回，再在 C3 找位置。結構比較確立，點位可能比較差。")
+preOnly  = input.bool(false, "　激進：只做 C2 收盤前提前進場", group = GE, tooltip = "只在「激進」有效。C2（或 Model 3 收回的那根）收盤確認時還沒進場，就放棄這個 CRT，不再用確認後的進場。2026-11 用 MT5 回測 16 個月：激進裡確認後才進的單扣點差後每筆約 −0.10R，提前進的約打平到正。")
 eC1      = input.bool(true, "① CISD 收盤直接進", group = GE, tooltip = "講義第 9 章（以做空為例，做多反過來）：推上去掃高點那段連續陽線，第一根的開盤價就是 CISD。LTF 帶缺口收盤跌破 CISD，那根收盤進。")
 eC2      = input.bool(true, "② 回踩 CISD", group = GE, tooltip = "CISD 被帶缺口跌破之後，在 CISD 價位掛單，等價格回踩成交。")
 eIF      = input.bool(true, "③ 回踩 IFVG", group = GE, tooltip = "推上去那段留下的多方 FVG，被收盤跌破變成 IFVG（角色反轉），在 IFVG 下緣掛單。")
@@ -1847,7 +1848,10 @@ if tfOK and newHTF and crts.size() > 0
                 c.age := c.age + 1
                 if c.age >= c3Bars
                     f_finish(c)
-        if conf
+        if conf and preOnly and entryTim == T_AGG
+            f_finish(c)
+            c.result := "未進場：C2 收盤前沒有提前進場（只做提前進場）"
+        else if conf
             bool first = not c.confirmed
             c.state     := 1
             c.age       := 0

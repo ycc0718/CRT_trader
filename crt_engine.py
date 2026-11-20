@@ -55,6 +55,7 @@ class Params:
     hide_poor: bool = False
     # ② entries
     aggressive: bool = False
+    pre_only: bool = False      # 激進時只做 C2 收盤前的提前進場（確認之後就不進了）
     e1: bool = True
     e2: bool = True
     e3: bool = True
@@ -1372,7 +1373,10 @@ class Engine:
                         cr.age += 1
                         if cr.age >= p.c3_bars:
                             self.finish(cr)
-                if conf:
+                if conf and p.pre_only and p.aggressive:
+                    # 只做提前進場：C2（或 M3 的收回 K）收盤確認時還沒進場，就不再用確認後的進場（16 個月回測：扣點差 ≈ −0.10R/筆）
+                    self.finish(cr, "未進場：C2 收盤前沒有提前進場（只做提前進場）")
+                elif conf:
                     first = not cr.confirmed
                     cr.state, cr.age, cr.waitCnt = 1, 0, 0
                     cr.model = 3 if cr.multi else 1
