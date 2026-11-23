@@ -136,6 +136,20 @@ def _eid(sym: str, ev) -> str:
     return f"{sym}|{ev.key}|{ev.kind}|{ev.t}|{ev.data.get('sig', '')}|{ev.data.get('ev', '')}"
 
 
+def _once(eid: str) -> str | None:
+    """一個 CRT 只會發生一次的事件（進場、「✓ TP1…」「保本出場」這類出場）不看 K 棒時間：
+    引擎改版後同一筆單的時間可能差一根 K，不要因為 eid 不一樣又發一次（2026-11-23 重開時重發過進場卡片）。"""
+    p = eid.split("|", 5)
+    if len(p) < 6:
+        return None
+    sym, key, kind, _t, _sig, ev = p
+    if kind == "entry":
+        return f"{sym}|{key}|entry"
+    if kind == "exit" and ev:
+        return f"{sym}|{key}|exit|{ev}"
+    return None
+
+
 def scan_once(cfg: dict, stateless: bool = False, results: dict | None = None) -> int:
     """results：給儀表板用，每個商品放 Engine（失敗就放 Exception）。"""
     st, msgs = ({}, {}) if stateless else load_state()
@@ -165,8 +179,17 @@ def scan_once(cfg: dict, stateless: bool = False, results: dict | None = None) -
         # 剛加進來的商品（紀錄裡沒有它）：跟第一次跑一樣，只送最近 15 分鐘的，舊的記成已送
         new_sym = not first_run and not stateless and not any(k.startswith(sym + "|") for k in st)
         look_s = 15 * 60_000 if new_sym else look
-        todo = [ev for ev in eng.events
-                if ev.kind in kinds and _eid(sym, ev) not in st and ev.t + ltf_ms >= now - look_s]
+        once = {o for o in map(_once, st) if o}
+        todo = []
+        for ev in eng.events:
+            eid = _eid(sym, ev)
+            if ev.kind not in kinds or eid in st or ev.t + ltf_ms < now - look_s:
+                continue
+            o = _once(eid)
+            if o and o in once:                  # 同一筆單的同一件事已經通知過（只是時間差一根 K）
+                st[eid] = ev.t + ltf_ms
+                continue
+            todo.append(ev)
         # 同一根 K、同一個 CRT 的多張掛單合成一則
         groups: list[list] = []
         for ev in todo:
