@@ -194,6 +194,7 @@ class CRT:
     tp1: bool = False
     t1Skip: bool = False
     eLv: float | None = None
+    eNow: bool = False          # 掛單價一出現就被收盤價穿過 → 那根收盤直接市價進（fillNow）
     tp2: bool = False
     tp3Hit: bool = False
     tp4Hit: bool = False
@@ -736,8 +737,10 @@ class Engine:
         head = f"{'⚡' if aggr else '🆕'} {self.disp()} | {self.crtName} CRT {'進場' if mode == 'entry' else '掛單'}【{'激進' if aggr else '標準'}】"
         how = ""
         if mode == "entry":
-            if sig in (2, 3, 5, 6, 7) and c.eLv is not None and abs(c.ePx - c.eLv) > 1e-12:
-                how = f"🧾 成交：訊號價 {self.px(c.eLv)} 出現時價格已經過了，下一根開盤 {self.px(c.ePx)} 直接成交（沒有另外發掛單通知）"
+            if sig in (2, 3, 5, 6, 7) and c.eNow:
+                how = f"🧾 成交：訊號價 {self.px(c.eLv)} 一出現價格就已經過了 → 這根收盤 {self.px(c.ePx)} 直接市價進場（現在就進，不用掛單）"
+            elif sig in (2, 3, 5, 6, 7) and c.eLv is not None and abs(c.ePx - c.eLv) > 1e-12:
+                how = f"🧾 成交：開盤跳過掛單價 {self.px(c.eLv)}，開盤價 {self.px(c.ePx)} 成交"
             elif sig in (2, 3, 5, 6, 7):
                 how = f"🧾 成交：掛單 {self.px(c.ePx)} 被碰到"
             elif sig == 1:
@@ -942,6 +945,31 @@ class Engine:
         if not ok:
             c.note = f"{self.kName(k)} {why}"
         return ok          # 通知在這根 K 最後由 syncOrder 統一發（只發最近的那張）
+
+    def fillNow(self, c: CRT) -> bool:
+        """掛單價一出現（或 FIB 跟著移動）就已經被這根的收盤價穿過 → 這根收盤直接市價進。
+        2026-11-23 以前是「不發掛單、下一根開盤成交」，要等下一根 K 收盤才發進場通知，晚 5 分鐘，使用者來不及。
+        只會遇到這根新設 / 剛移動的價位：之前的價位這根有碰到的，前面「掛單成交」那段已經成交了。"""
+        bar, bear = self.b(), c.dir < 0
+        best, bk = None, 0
+        for k in (2, 3, 5, 6, 7):
+            lv, ix = c.lv[k], c.ix[k]
+            if lv is not None and ix is not None and ix >= 0 and ((bar.c >= lv) if bear else (bar.c <= lv)):
+                if best is None or (lv < best if bear else lv > best):
+                    best, bk = lv, k
+        if best is None or not ((bar.c < c.sl) if bear else (bar.c > c.sl)):
+            return False
+        why = self.gate(c, best, True) if bk == 7 else self.dayBlock
+        if why:
+            c.note = f"{self.kName(bk)} {why}"
+            if bk == 7:
+                if c.actK == 7:
+                    self.cancelPending(c, f"{self.kName(7)} {why}")
+                self.setLv(c, 7, None, -1)
+            return False
+        c.eLv, c.eNow = best, True
+        self.enter(c, bar.c, bk)
+        return True
 
     def resetTrig(self, c: CRT):
         c.cbHit, c.cbN, c.cbGap, c.cbOKIdx = False, 0, False, None
@@ -1559,6 +1587,9 @@ class Engine:
                                         self.setLv(cr, 7, fp, i if first7 else cr.ix[7])
                                         if first7:
                                             newAct = True
+                                # 掛單價一出現就被收盤價穿過 → 這根收盤直接進，不等下一根開盤（通知才不會晚 5 分鐘）
+                                if not cr.entered and self.fillNow(cr):
+                                    newAct = True
                 if not cr.done and not cr.entered:
                     self.syncOrder(cr)
                 if newAct:

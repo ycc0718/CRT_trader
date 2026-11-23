@@ -2100,6 +2100,28 @@ if tfOK and crts.size() > 0
                                         newAct := true
                                         if alLimit
                                             alert(f_limitAlert(c, 7, fp) + "\n（FIB 掛單價會跟著新的極值移動）", alert.freq_once_per_bar)
+                            // 掛單價一出現就被收盤價穿過 → 這根收盤直接市價進，不等下一根開盤（2026-11-23，跟 Python fillNow 一樣）
+                            if not c.entered
+                                float nb = na
+                                int   nk = 0
+                                for k = 2 to 7
+                                    float nlv = f_lv(c, k)
+                                    int   nix = f_ix(c, k)
+                                    if not na(nlv) and not na(nix) and nix >= 0 and (bear ? close >= nlv : close <= nlv)
+                                        if na(nb) or (bear ? nlv < nb : nlv > nb)
+                                            nb := nlv
+                                            nk := k
+                                if not na(nb) and (bear ? close < c.sl : close > c.sl)
+                                    string nwhy = nk == 7 ? f_gate(c, nb, true) : dayBlock
+                                    if nwhy != ""
+                                        c.note := f_kName(nk) + " " + nwhy
+                                        if nk == 7
+                                            f_setLv(c, 7, na, -1)
+                                    else
+                                        f_enter(c, close, bar_index, time, nk)
+                                        newAct := true
+                                        if alEntry
+                                            alert(f_entryAlert(c), alert.freq_once_per_bar)
                             if newAct
                                 c.redraw := c.detail
             // 剛進場 / 掛單的不是最新訊號（激進）→ 變成最新
